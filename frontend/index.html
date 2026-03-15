@@ -1,0 +1,3444 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diamond Fincorp - Loan Management System</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #2563eb;
+            --primary-dark: #1e40af;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-600: #4b5563;
+            --gray-700: #374151;
+            --gray-800: #1f2937;
+            --gray-900: #111827;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: var(--gray-800);
+        }
+
+        .app-container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: white;
+            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .logo-section {
+            padding: 2rem 1.5rem;
+            border-bottom: 1px solid var(--gray-200);
+        }
+
+        .logo-section h1 {
+            font-size: 1.5rem;
+            color: var(--primary-color);
+            margin-bottom: 0.25rem;
+        }
+
+        .logo-section p {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+        }
+
+        .nav-menu {
+            flex: 1;
+            padding: 1rem 0;
+        }
+
+        .nav-item {
+            padding: 0.875rem 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--gray-700);
+            border-left: 3px solid transparent;
+        }
+
+        .nav-item:hover {
+            background: var(--gray-50);
+            color: var(--primary-color);
+        }
+
+        .nav-item.active {
+            background: #eff6ff;
+            color: var(--primary-color);
+            border-left-color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .nav-icon {
+            font-size: 1.25rem;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+
+        .content-header {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .content-header h2 {
+            font-size: 2rem;
+            color: var(--gray-900);
+            margin-bottom: 0.5rem;
+        }
+
+        .content-header p {
+            color: var(--gray-600);
+        }
+
+        /* Cards */
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            margin-bottom: 1.5rem;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .card-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--gray-900);
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid var(--primary-color);
+        }
+
+        .stat-card.success {
+            border-left-color: var(--success-color);
+        }
+
+        .stat-card.warning {
+            border-left-color: var(--warning-color);
+        }
+
+        .stat-card.danger {
+            border-left-color: var(--danger-color);
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+
+        .stat-change {
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+            color: var(--success-color);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .btn-secondary {
+            background: var(--gray-200);
+            color: var(--gray-700);
+        }
+
+        .btn-secondary:hover {
+            background: var(--gray-300);
+        }
+
+        .btn-success {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .btn-danger {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        /* Form */
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--gray-700);
+            margin-bottom: 0.5rem;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 8px;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+
+        /* Table */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: var(--gray-50);
+        }
+
+        th {
+            padding: 1rem;
+            text-align: left;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--gray-700);
+            border-bottom: 2px solid var(--gray-200);
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 0.875rem;
+        }
+
+        tr:hover {
+            background: var(--gray-50);
+        }
+
+        /* Chart Containers */
+        .chart-container {
+            position: relative;
+            height: 300px;
+            width: 100%;
+            margin-bottom: 1rem;
+        }
+
+        .chart-container-sm {
+            position: relative;
+            height: 250px;
+            width: 100%;
+        }
+
+        /* Dashboard Analytics (additional charts) */
+        .analytics-section {
+            margin-top: 1.5rem;
+        }
+
+        .analytics-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+
+        .analytics-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+
+        .analytics-subtitle {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            margin-top: 0.25rem;
+        }
+
+        .analytics-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1.25rem;
+        }
+
+        .chart-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-top: 0.25rem;
+        }
+
+        .chart-toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .chart-toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .mini-select {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 10px;
+            font-size: 0.875rem;
+            background: white;
+            cursor: pointer;
+            min-width: 120px;
+        }
+
+        .btn-ghost {
+            background: transparent;
+            border: 1px solid var(--gray-200);
+            color: var(--gray-700);
+        }
+
+        .btn-ghost:hover {
+            background: var(--gray-50);
+            border-color: var(--gray-300);
+        }
+
+        .hint {
+            font-size: 0.8rem;
+            color: var(--gray-600);
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge-success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .badge-warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-danger {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--gray-900);
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--gray-600);
+        }
+
+        /* Search */
+        .search-box {
+            position: relative;
+            margin-bottom: 1.5rem;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 8px;
+            font-size: 0.875rem;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--gray-600);
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--gray-600);
+        }
+
+        .spinner {
+            border: 3px solid var(--gray-200);
+            border-top: 3px solid var(--primary-color);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Alert */
+        .alert {
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+            border-left: 4px solid var(--success-color);
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+            border-left: 4px solid var(--danger-color);
+        }
+
+        /* Loan Summary Panel */
+        .loan-summary-panel {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+        }
+
+        .loan-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+
+        .loan-summary-item h4 {
+            font-size: 0.875rem;
+            opacity: 0.9;
+            margin-bottom: 0.5rem;
+        }
+
+        .loan-summary-item p {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .app-container {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .main-content {
+                padding: 1.25rem;
+            }
+
+            .analytics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ===== FINANCIAL DASHBOARD STYLES ===== */
+
+        /* Filter Bar */
+        .dashboard-filters {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+            padding: 1rem 1.5rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .filter-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--gray-600);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .filter-select {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 8px;
+            font-size: 0.875rem;
+            background: white;
+            min-width: 140px;
+            cursor: pointer;
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        /* Premium KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .kpi-card {
+            background: white;
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .kpi-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15);
+        }
+
+        .kpi-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+        }
+
+        .kpi-card.primary::before {
+            background: linear-gradient(90deg, #2563eb, #3b82f6);
+        }
+
+        .kpi-card.success::before {
+            background: linear-gradient(90deg, #059669, #10b981);
+        }
+
+        .kpi-card.warning::before {
+            background: linear-gradient(90deg, #d97706, #f59e0b);
+        }
+
+        .kpi-card.danger::before {
+            background: linear-gradient(90deg, #dc2626, #ef4444);
+        }
+
+        .kpi-card.purple::before {
+            background: linear-gradient(90deg, #7c3aed, #8b5cf6);
+        }
+
+        .kpi-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .kpi-icon.primary {
+            background: #dbeafe;
+        }
+
+        .kpi-icon.success {
+            background: #d1fae5;
+        }
+
+        .kpi-icon.warning {
+            background: #fef3c7;
+        }
+
+        .kpi-icon.danger {
+            background: #fee2e2;
+        }
+
+        .kpi-icon.purple {
+            background: #ede9fe;
+        }
+
+        .kpi-label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--gray-600);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .kpi-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--gray-900);
+            line-height: 1.2;
+        }
+
+        .kpi-subtext {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+            margin-top: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .kpi-breakdown {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid var(--gray-100);
+        }
+
+        .breakdown-item {
+            font-size: 0.7rem;
+            color: var(--gray-600);
+        }
+
+        .breakdown-item span {
+            font-weight: 600;
+            color: var(--gray-800);
+        }
+
+        /* Gauge Container */
+        .gauge-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .gauge-card {
+            background: white;
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        .gauge-wrapper {
+            position: relative;
+            width: 120px;
+            height: 80px;
+            margin: 0 auto 1rem;
+        }
+
+        .gauge-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+
+        .gauge-label {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            font-weight: 500;
+        }
+
+        .health-badge {
+            display: inline-block;
+            padding: 0.5rem 1.25rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 700;
+            margin-top: 0.5rem;
+        }
+
+        .health-badge.excellent {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .health-badge.good {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .health-badge.fair {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .health-badge.attention {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        /* Chart Containers */
+        .charts-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .chart-card {
+            background: white;
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .chart-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--gray-800);
+        }
+
+        .chart-subtitle {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+        }
+
+        .chart-container {
+            height: 280px;
+            position: relative;
+        }
+
+        .chart-container-sm {
+            height: 220px;
+            position: relative;
+        }
+
+        /* Logo Styling */
+        .logo-image {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            object-fit: contain;
+            margin-bottom: 0.5rem;
+        }
+
+        .logo-section h1 {
+            font-size: 1.25rem;
+            color: #1e3a5f;
+            margin-bottom: 0.125rem;
+        }
+
+        /* Quick Insights */
+        .insights-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 1200px) {
+            .kpi-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .gauge-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .charts-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .kpi-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .gauge-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .dashboard-filters {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // API Configuration
+        const API_BASE_URL = ''; // Use relative paths for unified deployment
+
+        // API Service
+        const api = {
+            async request(endpoint, options = {}) {
+                try {
+                    const response = await axios({
+                        url: `${API_BASE_URL}${endpoint}`,
+                        ...options
+                    });
+                    return response.data;
+                } catch (error) {
+                    console.error('API Error:', error);
+                    throw error;
+                }
+            },
+
+            // Dashboard
+            getDashboardStats: () => api.request('/dashboard/stats'),
+            getLoanTrends: () => api.request('/dashboard/loan-trends'),
+            getFinancialMetrics: (params) => api.request('/dashboard/financial-metrics', { params }),
+            getTrendData: (params) => api.request('/dashboard/trend-data', { params }),
+
+            // Customers
+            getCustomers: (params) => api.request('/customers', { params }),
+            getCustomer: (id) => api.request(`/customers/${id}`),
+            createCustomer: (data) => api.request('/customers', { method: 'POST', data }),
+            updateCustomer: (id, data) => api.request(`/customers/${id}`, { method: 'PUT', data }),
+
+            // Loans
+            getLoans: (params) => api.request('/loans', { params }),
+            getLoanSummary: (id) => api.request(`/loans/${id}/summary`),
+            createLoan: (data) => api.request('/loans', { method: 'POST', data }),
+            updateLoan: (id, data) => api.request(`/loans/${id}`, { method: 'PUT', data }),
+            waiveInterest: (id, data) => api.request(`/loans/${id}/waive-interest`, { method: 'POST', data }),
+            getWaiverHistory: (id) => api.request(`/loans/${id}/waiver-history`),
+
+            // Payments
+            getPayments: (params) => api.request('/payments', { params }),
+            createPayment: (data) => api.request('/payments', { method: 'POST', data }),
+
+            // Capital
+            getCapitalInjections: () => api.request('/capital-injections'),
+            createCapitalInjection: (data) => api.request('/capital-injections', { method: 'POST', data }),
+            getCapitalSummary: () => api.request('/capital/summary'),
+
+            // Reports
+            getReportByTransactionType: (params) => api.request('/reports/by-transaction-type', { params }),
+            getProfitabilityReport: (params) => api.request('/reports/profitability', { params }),
+            getCustomerExposure: (params) => api.request('/reports/customer-exposure', { params }),
+
+            // Audit
+            getAuditLog: (params) => api.request('/audit-log', { params })
+        };
+
+        // Format currency
+        const formatCurrency = (amount) => {
+            return new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                minimumFractionDigits: 0
+            }).format(amount);
+        };
+
+        const formatINRCompact = (value) => {
+            const v = Number(value || 0);
+            if (!isFinite(v)) return '₹0';
+            const abs = Math.abs(v);
+            if (abs >= 10000000) return '₹' + (v / 10000000).toFixed(2) + 'Cr';
+            if (abs >= 100000) return '₹' + (v / 100000).toFixed(2) + 'L';
+            if (abs >= 1000) return '₹' + (v / 1000).toFixed(1) + 'K';
+            return '₹' + Math.round(v).toLocaleString('en-IN');
+        };
+
+        // Format date
+        const formatDate = (date) => {
+            if (!date) return '-';
+            return new Date(date).toLocaleDateString('en-IN');
+        };
+
+        const downloadCsv = ({ filename, headers, rows }) => {
+            const escape = (val) => {
+                if (val === null || val === undefined) return '';
+                const s = String(val);
+                if (s.includes('"') || s.includes(',') || s.includes('\n') || s.includes('\r')) {
+                    return `"${s.replaceAll('"', '""')}"`;
+                }
+                return s;
+            };
+
+            const csv = [
+                headers.map(escape).join(','),
+                ...rows.map(r => r.map(escape).join(','))
+            ].join('\n');
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename.endsWith('.csv') ? filename : `${filename}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+        const getAvailableYearsFromTrends = (trends) => {
+            const years = new Set();
+            (trends || []).forEach(t => {
+                const y = String(t.month || '').slice(0, 4);
+                if (y && y !== '0000') years.add(y);
+            });
+            return Array.from(years).sort();
+        };
+
+        const buildYearSeriesFromTrends = (trends, valueKey) => {
+            const map = new Map();
+            (trends || []).forEach(t => {
+                const y = String(t.month || '').slice(0, 4);
+                if (!y) return;
+                const v = Number(t[valueKey] || 0);
+                map.set(y, (map.get(y) || 0) + (isFinite(v) ? v : 0));
+            });
+            const labels = Array.from(map.keys()).sort();
+            const data = labels.map(y => Number(map.get(y) || 0));
+            return { labels, data };
+        };
+
+        const buildMonthSeriesFromTrends = (trends, valueKey, year) => {
+            const map = new Map();
+            (trends || []).forEach(t => {
+                const m = String(t.month || '');
+                if (!year || !m.startsWith(year + '-')) return;
+                const monthIdx = Math.max(0, Math.min(11, Number(m.slice(5, 7)) - 1));
+                const v = Number(t[valueKey] || 0);
+                map.set(monthIdx, (map.get(monthIdx) || 0) + (isFinite(v) ? v : 0));
+            });
+            const labels = MONTHS_SHORT;
+            const data = labels.map((_, idx) => Number(map.get(idx) || 0));
+            return { labels, data };
+        };
+
+        function LineChartCard({
+            title,
+            subtitle,
+            labels,
+            datasets,
+            height = 300,
+            toolbarLeft = null,
+            onExport
+        }) {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current) return;
+                if (typeof Chart === 'undefined') return;
+
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                    chartRef.current = null;
+                }
+
+                const ctx = canvasRef.current.getContext('2d');
+                chartRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: { duration: 250 },
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { display: true, position: 'top' },
+                            tooltip: {
+                                callbacks: {
+                                    label: (t) => `${t.dataset.label}: ${formatCurrency(t.raw)}`
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: { callback: (v) => formatINRCompact(v) }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                        chartRef.current = null;
+                    }
+                };
+            }, [labels, datasets]);
+
+            return (
+                <div className="chart-card">
+                    <div className="chart-header">
+                        <div style={{ width: '100%' }}>
+                            <div className="chart-title">{title}</div>
+                            {subtitle && <div className="chart-subtitle">{subtitle}</div>}
+                            <div className="chart-toolbar">
+                                <div className="chart-toolbar-left">{toolbarLeft}</div>
+                                <div className="chart-toolbar-right">
+                                    {onExport && (
+                                        <button className="btn btn-ghost" style={{ padding: '0.5rem 0.9rem' }} onClick={onExport}>
+                                            📥 Export
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="chart-container" style={{ height }}>
+                        <canvas ref={canvasRef}></canvas>
+                    </div>
+                </div>
+            );
+        }
+
+        // Dashboard Component - Financial Performance Dashboard
+        function Dashboard() {
+            const [metrics, setMetrics] = useState(null);
+            const [trends, setTrends] = useState([]);
+            const [allTrends, setAllTrends] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [filters, setFilters] = useState({
+                loan_type: 'ALL',
+                status: 'ALL',
+                customer_id: '',
+                start_date: '',
+                end_date: ''
+            });
+            const [customers, setCustomers] = useState([]);
+            const trendChartInstance = useRef(null);
+            const collectionChartInstance = useRef(null);
+            const distributionChartInstance = useRef(null);
+            const [selectedYear, setSelectedYear] = useState('');
+
+            const trendChartRef = useRef(null);
+            const collectionChartRef = useRef(null);
+            const distributionChartRef = useRef(null);
+
+            useEffect(() => {
+                loadCustomers();
+            }, []);
+
+            useEffect(() => {
+                loadData();
+            }, [filters]);
+
+            useEffect(() => {
+                if (!allTrends || allTrends.length === 0) return;
+                const years = getAvailableYearsFromTrends(allTrends);
+                const latestYear = years[years.length - 1] || '';
+                setSelectedYear(prev => (prev && years.includes(prev)) ? prev : latestYear);
+            }, [allTrends]);
+
+            const loadCustomers = async () => {
+                try {
+                    const data = await api.getCustomers();
+                    setCustomers(data);
+                } catch (error) {
+                    console.error('Failed to load customers:', error);
+                }
+            };
+
+            useEffect(() => {
+                if (trends.length > 0 && metrics) {
+                    // Use setTimeout to defer chart rendering until after DOM is fully painted
+                    // This ensures canvas elements exist in the DOM before Chart.js tries to access them
+                    const timeoutId = setTimeout(() => {
+                        try {
+                            if (typeof Chart === 'undefined') {
+                                console.error('CRITICAL: Chart.js library is not loaded!');
+                                return;
+                            }
+                            console.log('Rendering charts with trends:', trends.length);
+                            renderCharts();
+                        } catch (e) {
+                            console.error('Error rendering charts:', e.message);
+                        }
+                    }, 100); // Small delay to ensure DOM is ready
+                    
+                    return () => {
+                        clearTimeout(timeoutId);
+                        if (trendChartInstance.current) { trendChartInstance.current.destroy(); trendChartInstance.current = null; }
+                        if (collectionChartInstance.current) { collectionChartInstance.current.destroy(); collectionChartInstance.current = null; }
+                        if (distributionChartInstance.current) { distributionChartInstance.current.destroy(); distributionChartInstance.current = null; }
+                    };
+                } else if (!loading && metrics && trends.length === 0) {
+                    console.warn('No trend data available to render charts');
+                }
+
+                return () => {
+                    if (trendChartInstance.current) { trendChartInstance.current.destroy(); trendChartInstance.current = null; }
+                    if (collectionChartInstance.current) { collectionChartInstance.current.destroy(); collectionChartInstance.current = null; }
+                    if (distributionChartInstance.current) { distributionChartInstance.current.destroy(); distributionChartInstance.current = null; }
+                };
+            }, [trends, metrics]);
+
+            const loadData = async () => {
+                try {
+                    console.log('Loading data...');
+                    const [metricsData, trendsData] = await Promise.all([
+                        api.getFinancialMetrics(filters),
+                        api.getTrendData({ ...filters, months: 84 })
+                    ]);
+                    console.log('Data loaded:', { metrics: metricsData, trends: trendsData });
+
+                    if (!trendsData || trendsData.length === 0) {
+                        console.error('Trends data is empty!');
+                    }
+
+                    setMetrics(metricsData);
+                    setAllTrends(trendsData || []);
+                    setTrends((trendsData || []).slice(-12));
+                } catch (error) {
+                    console.error('Failed to load dashboard data:', error);
+                    alert('Failed to load data: ' + error.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const exportYearSeries = (title, valueKey) => {
+                const s = buildYearSeriesFromTrends(allTrends, valueKey);
+                downloadCsv({
+                    filename: `${title.replaceAll(' ', '_')}_by_year_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers: ['Year', title],
+                    rows: s.labels.map((y, idx) => [y, s.data[idx]])
+                });
+            };
+
+            const exportMonthSeries = (title, valueKey, year) => {
+                const s = buildMonthSeriesFromTrends(allTrends, valueKey, year);
+                downloadCsv({
+                    filename: `${title.replaceAll(' ', '_')}_by_month_${year}_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers: ['Month', 'Year', title],
+                    rows: s.labels.map((m, idx) => [m, year, s.data[idx]])
+                });
+            };
+
+            const exportTrend12 = () => {
+                downloadCsv({
+                    filename: `capital_flow_trend_last_12_months_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers: ['Month', 'Principal Disbursed', 'Principal Collected', 'Outstanding Balance'],
+                    rows: (trends || []).map(t => [t.month_label || t.month || '-', t.principal_disbursed || 0, t.principal_collected || 0, t.outstanding_balance || 0])
+                });
+            };
+
+            const exportCollectionsBreakdown12 = () => {
+                downloadCsv({
+                    filename: `collections_breakdown_last_12_months_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers: ['Month', 'Principal Collected', 'Interest Collected', 'Total Collected'],
+                    rows: (trends || []).map(t => [t.month_label || t.month || '-', t.principal_collected || 0, t.interest_collected || 0, t.total_collected || 0])
+                });
+            };
+
+            const exportDistribution = () => {
+                if (!metrics) return;
+                downloadCsv({
+                    filename: `portfolio_distribution_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers: ['Category', 'Loans', 'Active Loans', 'Principal Disbursed', 'Principal Collected', 'Principal Outstanding', 'Interest Collected'],
+                    rows: ['KULU', 'DEBT', 'OTHER'].map(type => ([
+                        type,
+                        metrics.by_type?.[type]?.loan_count ?? 0,
+                        metrics.by_type?.[type]?.active_loans ?? 0,
+                        metrics.by_type?.[type]?.principal_disbursed ?? 0,
+                        metrics.by_type?.[type]?.principal_collected ?? 0,
+                        metrics.by_type?.[type]?.principal_outstanding ?? 0,
+                        metrics.by_type?.[type]?.interest_collected ?? 0
+                    ]))
+                });
+            };
+
+            const renderCharts = () => {
+                // Diagnostic Alerts
+                if (trends.length > 0) {
+                    const sample = trends[0];
+                    const keys = Object.keys(sample).join(', ');
+                    // alert('DEBUG: Trend Keys: ' + keys); // Uncomment to debug keys
+                    // alert('DEBUG: Ref status: ' + (trendChartRef.current ? 'FOUND' : 'MISSING'));
+
+                    // console.log('Trend Sample:', sample);
+                }
+
+                // Destroy existing charts
+                if (trendChartInstance.current) { trendChartInstance.current.destroy(); trendChartInstance.current = null; }
+                if (collectionChartInstance.current) { collectionChartInstance.current.destroy(); collectionChartInstance.current = null; }
+                if (distributionChartInstance.current) { distributionChartInstance.current.destroy(); distributionChartInstance.current = null; }
+
+                const chartColors = {
+                    disbursed: '#2563eb',
+                    collected: '#10b981',
+                    outstanding: '#f59e0b',
+                    interest: '#8b5cf6',
+                    kulu: '#3b82f6',
+                    debt: '#f97316',
+                    other: '#6b7280'
+                };
+
+                // Trend Line Chart
+                const trendCanvas = trendChartRef.current || document.getElementById('trendChart');
+                if (trendCanvas) {
+                    const ctx = trendCanvas.getContext('2d');
+                    const newTrendChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: trends.map(t => t.month_label),
+                            datasets: [
+                                {
+                                    label: 'Cumulative Disbursed',
+                                    data: trends.map(t => t.cumulative_disbursed),
+                                    borderColor: chartColors.disbursed,
+                                    backgroundColor: chartColors.disbursed + '20',
+                                    fill: false,
+                                    tension: 0.4,
+                                    borderWidth: 2
+                                },
+                                {
+                                    label: 'Cumulative Collected',
+                                    data: trends.map(t => t.cumulative_collected),
+                                    borderColor: chartColors.collected,
+                                    backgroundColor: chartColors.collected + '20',
+                                    fill: false,
+                                    tension: 0.4,
+                                    borderWidth: 2
+                                },
+                                {
+                                    label: 'Outstanding Balance',
+                                    data: trends.map(t => t.outstanding_balance),
+                                    borderColor: chartColors.outstanding,
+                                    backgroundColor: chartColors.outstanding + '20',
+                                    fill: true,
+                                    tension: 0.4,
+                                    borderWidth: 2
+                                }
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { position: 'top' },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => `${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`
+                                    }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    ticks: {
+                                        callback: (value) => {
+                                            if (value >= 10000000) return '₹' + (value / 10000000).toFixed(1) + 'Cr';
+                                            if (value >= 100000) return '₹' + (value / 100000).toFixed(1) + 'L';
+                                            if (value >= 1000) return '₹' + (value / 1000).toFixed(0) + 'K';
+                                            return '₹' + value;
+                                        }
+                                    }
+                                }
+                            },
+                            animation: false
+                        }
+                    });
+                    trendChartInstance.current = newTrendChart;
+                } else {
+                    console.error('Trend Chart Canvas not found via Ref or ID');
+                }
+
+                // Stacked Bar Chart - Collections
+                const collectionCanvas = collectionChartRef.current || document.getElementById('collectionChart');
+                if (collectionCanvas) {
+                    const ctx = collectionCanvas.getContext('2d');
+                    const newCollectionChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: trends.map(t => t.month_label),
+                            datasets: [
+                                {
+                                    label: 'Principal Collected',
+                                    data: trends.map(t => t.principal_collected),
+                                    backgroundColor: chartColors.collected,
+                                    borderRadius: 4
+                                },
+                                {
+                                    label: 'Interest Collected',
+                                    data: trends.map(t => t.interest_collected),
+                                    backgroundColor: chartColors.interest,
+                                    borderRadius: 4
+                                }
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { position: 'top' },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => `${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`
+                                    }
+                                }
+                            },
+                            scales: {
+                                x: { stacked: true },
+                                y: {
+                                    stacked: true,
+                                    beginAtZero: true,
+                                    ticks: {
+                                        callback: (value) => {
+                                            if (value >= 100000) return '₹' + (value / 100000).toFixed(1) + 'L';
+                                            if (value >= 1000) return '₹' + (value / 1000).toFixed(0) + 'K';
+                                            return '₹' + value;
+                                        }
+                                    }
+                                }
+                            },
+                            animation: false
+                        }
+                    });
+                    collectionChartInstance.current = newCollectionChart;
+                }
+
+                // Doughnut Chart - Portfolio Distribution
+                const distributionCanvas = distributionChartRef.current || document.getElementById('distributionChart');
+                if (distributionCanvas && metrics) {
+                    const ctx = distributionCanvas.getContext('2d');
+                    const byType = metrics.by_type;
+                    const newDistChart = new Chart(ctx, {
+                        type: 'doughnut',
+                        data: {
+                            labels: ['KULU', 'DEBT', 'OTHER'],
+                            datasets: [{
+                                data: [
+                                    byType.KULU.principal_disbursed,
+                                    byType.DEBT.principal_disbursed,
+                                    byType.OTHER.principal_disbursed
+                                ],
+                                backgroundColor: [chartColors.kulu, chartColors.debt, chartColors.other],
+                                borderWidth: 0
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            cutout: '65%',
+                            plugins: {
+                                legend: { position: 'bottom' },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => `${ctx.label}: ${formatCurrency(ctx.raw)}`
+                                    }
+                                }
+                            },
+                            animation: false
+                        }
+                    });
+                    distributionChartInstance.current = newDistChart;
+                }
+            };
+
+            const getHealthClass = (health) => {
+                switch (health) {
+                    case 'EXCELLENT': return 'excellent';
+                    case 'GOOD': return 'good';
+                    case 'FAIR': return 'fair';
+                    default: return 'attention';
+                }
+            };
+
+            if (loading) {
+                return <div className="loading"><div className="spinner"></div><p>Loading financial dashboard...</p></div>;
+            }
+
+            if (!metrics) {
+                return <div className="loading"><p>Failed to load dashboard data</p></div>;
+            }
+
+            const { overall, by_type, collection_efficiency, portfolio_health, health_score } = metrics;
+
+            const availableYears = getAvailableYearsFromTrends(allTrends);
+            const effectiveYear = selectedYear || (availableYears[availableYears.length - 1] || '');
+
+            const seriesPrincipalDisbursedYear = buildYearSeriesFromTrends(allTrends, 'principal_disbursed');
+            const seriesPrincipalDisbursedMonth = buildMonthSeriesFromTrends(allTrends, 'principal_disbursed', effectiveYear);
+
+            const seriesTotalCollectedYear = buildYearSeriesFromTrends(allTrends, 'total_collected');
+            const seriesTotalCollectedMonth = buildMonthSeriesFromTrends(allTrends, 'total_collected', effectiveYear);
+
+            const seriesPrincipalCollectedYear = buildYearSeriesFromTrends(allTrends, 'principal_collected');
+            const seriesPrincipalCollectedMonth = buildMonthSeriesFromTrends(allTrends, 'principal_collected', effectiveYear);
+
+            const seriesInterestCollectedYear = buildYearSeriesFromTrends(allTrends, 'interest_collected');
+            const seriesInterestCollectedMonth = buildMonthSeriesFromTrends(allTrends, 'interest_collected', effectiveYear);
+
+            return (
+                <div>
+                    {/* Header */}
+                    <div className="content-header" style={{ background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)', color: 'white', marginBottom: '1.5rem' }}>
+                        <h2 style={{ color: 'white' }}>📊 Financial Performance Dashboard</h2>
+                        <p style={{ color: 'rgba(255,255,255,0.8)' }}>Capital flow, recovery health & portfolio visibility</p>
+                    </div>
+
+                    {/* Filters */}
+                    <div className="dashboard-filters">
+                        <div className="filter-group">
+                            <span className="filter-label">Loan Category</span>
+                            <select
+                                className="filter-select"
+                                value={filters.loan_type}
+                                onChange={(e) => { setLoading(true); setFilters({ ...filters, loan_type: e.target.value }); }}
+                            >
+                                <option value="ALL">All Types</option>
+                                <option value="KULU">KULU</option>
+                                <option value="DEBT">DEBT</option>
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <span className="filter-label">Loan Status</span>
+                            <select
+                                className="filter-select"
+                                value={filters.status}
+                                onChange={(e) => { setLoading(true); setFilters({ ...filters, status: e.target.value }); }}
+                            >
+                                <option value="ALL">All Status</option>
+                                <option value="ACTIVE">Active</option>
+                                <option value="COMPLETED">Completed</option>
+                                <option value="DEFAULTED">Defaulted</option>
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <span className="filter-label">Customer</span>
+                            <select
+                                className="filter-select"
+                                value={filters.customer_id}
+                                onChange={(e) => { setLoading(true); setFilters({ ...filters, customer_id: e.target.value }); }}
+                            >
+                                <option value="">All Customers</option>
+                                {customers.map(c => (
+                                    <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <span className="filter-label">From Date</span>
+                            <input
+                                type="date"
+                                className="filter-select"
+                                value={filters.start_date}
+                                onChange={(e) => { setLoading(true); setFilters({ ...filters, start_date: e.target.value }); }}
+                            />
+                        </div>
+                        <div className="filter-group">
+                            <span className="filter-label">To Date</span>
+                            <input
+                                type="date"
+                                className="filter-select"
+                                value={filters.end_date}
+                                onChange={(e) => { setLoading(true); setFilters({ ...filters, end_date: e.target.value }); }}
+                            />
+                        </div>
+                        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>Last updated: {new Date().toLocaleTimeString('en-IN')}</span>
+                            <button className="btn btn-secondary" style={{ padding: '0.5rem 1rem' }} onClick={() => { setLoading(true); loadData(); }}>
+                                🔄 Refresh
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* KPI Cards */}
+                    <div className="kpi-grid">
+                        <div className="kpi-card primary">
+                            <div className="kpi-icon primary">💰</div>
+                            <div className="kpi-label">Total Principal Disbursed</div>
+                            <div className="kpi-value">{formatCurrency(overall.principal_disbursed)}</div>
+                            <div className="kpi-breakdown">
+                                <span className="breakdown-item">KULU: <span>{formatCurrency(by_type.KULU.principal_disbursed)}</span></span>
+                                <span className="breakdown-item">DEBT: <span>{formatCurrency(by_type.DEBT.principal_disbursed)}</span></span>
+                            </div>
+                        </div>
+
+                        <div className="kpi-card success">
+                            <div className="kpi-icon success">✅</div>
+                            <div className="kpi-label">Principal Collected</div>
+                            <div className="kpi-value">{formatCurrency(overall.principal_collected)}</div>
+                            <div className="kpi-subtext">
+                                <span style={{ color: 'var(--success-color)' }}>↑ {overall.recovery_rate.toFixed(1)}% recovered</span>
+                            </div>
+                            <div className="kpi-breakdown">
+                                <span className="breakdown-item">KULU: <span>{formatCurrency(by_type.KULU.principal_collected)}</span></span>
+                                <span className="breakdown-item">DEBT: <span>{formatCurrency(by_type.DEBT.principal_collected)}</span></span>
+                            </div>
+                        </div>
+
+                        <div className="kpi-card warning">
+                            <div className="kpi-icon warning">⚠️</div>
+                            <div className="kpi-label">Outstanding Principal</div>
+                            <div className="kpi-value">{formatCurrency(overall.principal_outstanding)}</div>
+                            <div className="kpi-subtext">
+                                <span>Exposure risk: {overall.active_loans} active loans</span>
+                            </div>
+                            <div className="kpi-breakdown">
+                                <span className="breakdown-item">KULU: <span>{formatCurrency(by_type.KULU.principal_outstanding)}</span></span>
+                                <span className="breakdown-item">DEBT: <span>{formatCurrency(by_type.DEBT.principal_outstanding)}</span></span>
+                            </div>
+                        </div>
+
+                        <div className="kpi-card purple">
+                            <div className="kpi-icon purple">💵</div>
+                            <div className="kpi-label">Interest Collected (Revenue)</div>
+                            <div className="kpi-value">{formatCurrency(overall.interest_collected)}</div>
+                            <div className="kpi-subtext">
+                                <span>Total inflow: <strong>{formatCurrency(overall.total_collected)}</strong></span>
+                            </div>
+                            <div className="kpi-breakdown">
+                                <span className="breakdown-item">KULU: <span>{formatCurrency(by_type.KULU.interest_collected)}</span></span>
+                                <span className="breakdown-item">DEBT: <span>{formatCurrency(by_type.DEBT.interest_collected)}</span></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Gauge Cards */}
+                    <div className="gauge-grid">
+                        <div className="gauge-card">
+                            <div className="gauge-value" style={{ color: overall.recovery_rate > 50 ? '#10b981' : overall.recovery_rate > 30 ? '#f59e0b' : '#ef4444' }}>
+                                {overall.recovery_rate.toFixed(1)}%
+                            </div>
+                            <div className="gauge-label">Recovery Rate</div>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+                                Principal Collected ÷ Disbursed
+                            </div>
+                        </div>
+
+                        <div className="gauge-card">
+                            <div className="gauge-value" style={{ color: collection_efficiency > 50 ? '#10b981' : collection_efficiency > 30 ? '#f59e0b' : '#ef4444' }}>
+                                {collection_efficiency.toFixed(1)}%
+                            </div>
+                            <div className="gauge-label">Collection Efficiency</div>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+                                Interest Collected ÷ Accrued
+                            </div>
+                        </div>
+
+                        <div className="gauge-card">
+                            <div className={`health-badge ${getHealthClass(portfolio_health)}`}>
+                                {portfolio_health}
+                            </div>
+                            <div className="gauge-label" style={{ marginTop: '0.75rem' }}>Portfolio Health</div>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--gray-500)', marginTop: '0.5rem' }}>
+                                Health Score: {health_score}/100
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Charts Row 1 */}
+                    <div className="charts-row">
+                        <div className="chart-card">
+                            <div className="chart-header">
+                                <div>
+                                    <div className="chart-title">Capital Flow Trend</div>
+                                    <div className="chart-subtitle">Disbursed vs Collected vs Outstanding over 12 months</div>
+                                </div>
+                                <button className="btn btn-ghost" style={{ padding: '0.5rem 0.9rem' }} onClick={exportTrend12}>📥 Export</button>
+                            </div>
+                            <div className="chart-container">
+                                <canvas id="trendChart" ref={trendChartRef}></canvas>
+                            </div>
+                        </div>
+
+                        <div className="chart-card">
+                            <div className="chart-header">
+                                <div>
+                                    <div className="chart-title">Portfolio Distribution</div>
+                                    <div className="chart-subtitle">By loan category</div>
+                                </div>
+                                <button className="btn btn-ghost" style={{ padding: '0.5rem 0.9rem' }} onClick={exportDistribution}>📥 Export</button>
+                            </div>
+                            <div className="chart-container-sm">
+                                <canvas id="distributionChart" ref={distributionChartRef}></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Charts Row 2 */}
+                    <div className="chart-card">
+                        <div className="chart-header">
+                            <div>
+                                <div className="chart-title">Monthly Collections Breakdown</div>
+                                <div className="chart-subtitle">Principal vs Interest contributions</div>
+                            </div>
+                            <button className="btn btn-ghost" style={{ padding: '0.5rem 0.9rem' }} onClick={exportCollectionsBreakdown12}>📥 Export</button>
+                        </div>
+                        <div className="chart-container">
+                            <canvas id="collectionChart" ref={collectionChartRef}></canvas>
+                        </div>
+                    </div>
+
+                    {/* Additional Time-Based Analytics */}
+                    <div className="analytics-section">
+                        <div className="card">
+                            <div className="analytics-header">
+                                <div>
+                                    <div className="analytics-title">📈 Time-based Financial Analytics</div>
+                                    <div className="analytics-subtitle">Yearly and monthly views derived from the same dashboard filters</div>
+                                </div>
+                                <div className="analytics-controls">
+                                    <span className="hint">Month charts year:</span>
+                                    <select className="mini-select" value={effectiveYear} onChange={(e) => setSelectedYear(e.target.value)}>
+                                        {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="analytics-grid">
+                                {/* Principal Disbursed */}
+                                <LineChartCard
+                                    title="Principal Disbursed vs Year"
+                                    subtitle="Total principal disbursed per year (current filters)"
+                                    labels={seriesPrincipalDisbursedYear.labels}
+                                    datasets={[{
+                                        label: 'Principal Disbursed',
+                                        data: seriesPrincipalDisbursedYear.data,
+                                        borderColor: '#2563eb',
+                                        backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportYearSeries('Principal Disbursed', 'principal_disbursed')}
+                                />
+
+                                <LineChartCard
+                                    title="Principal Disbursed vs Month"
+                                    subtitle={effectiveYear ? `Monthly disbursed amounts for ${effectiveYear}` : 'Monthly disbursed amounts'}
+                                    labels={seriesPrincipalDisbursedMonth.labels}
+                                    datasets={[{
+                                        label: `Principal Disbursed (${effectiveYear || 'Year'})`,
+                                        data: seriesPrincipalDisbursedMonth.data,
+                                        borderColor: '#1e40af',
+                                        backgroundColor: 'rgba(30, 64, 175, 0.10)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    toolbarLeft={
+                                        <div className="hint">Tip: uses the same filters above; year selector changes only month charts.</div>
+                                    }
+                                    onExport={() => exportMonthSeries('Principal Disbursed', 'principal_disbursed', effectiveYear)}
+                                />
+
+                                {/* Payment Received (Total) */}
+                                <LineChartCard
+                                    title="Payment Received vs Year"
+                                    subtitle="Total payments received (principal + interest) per year"
+                                    labels={seriesTotalCollectedYear.labels}
+                                    datasets={[{
+                                        label: 'Payment Received',
+                                        data: seriesTotalCollectedYear.data,
+                                        borderColor: '#10b981',
+                                        backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportYearSeries('Payment Received', 'total_collected')}
+                                />
+
+                                <LineChartCard
+                                    title="Payment Received vs Month"
+                                    subtitle={effectiveYear ? `Monthly total payments for ${effectiveYear}` : 'Monthly total payments'}
+                                    labels={seriesTotalCollectedMonth.labels}
+                                    datasets={[{
+                                        label: `Payment Received (${effectiveYear || 'Year'})`,
+                                        data: seriesTotalCollectedMonth.data,
+                                        borderColor: '#059669',
+                                        backgroundColor: 'rgba(5, 150, 105, 0.10)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportMonthSeries('Payment Received', 'total_collected', effectiveYear)}
+                                />
+
+                                {/* Principal Received */}
+                                <LineChartCard
+                                    title="Principal Received vs Year"
+                                    subtitle="Total principal collected per year"
+                                    labels={seriesPrincipalCollectedYear.labels}
+                                    datasets={[{
+                                        label: 'Principal Received',
+                                        data: seriesPrincipalCollectedYear.data,
+                                        borderColor: '#0ea5e9',
+                                        backgroundColor: 'rgba(14, 165, 233, 0.12)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportYearSeries('Principal Received', 'principal_collected')}
+                                />
+
+                                <LineChartCard
+                                    title="Principal Received vs Month"
+                                    subtitle={effectiveYear ? `Monthly principal collected for ${effectiveYear}` : 'Monthly principal collected'}
+                                    labels={seriesPrincipalCollectedMonth.labels}
+                                    datasets={[{
+                                        label: `Principal Received (${effectiveYear || 'Year'})`,
+                                        data: seriesPrincipalCollectedMonth.data,
+                                        borderColor: '#0284c7',
+                                        backgroundColor: 'rgba(2, 132, 199, 0.10)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportMonthSeries('Principal Received', 'principal_collected', effectiveYear)}
+                                />
+
+                                {/* Interest Received */}
+                                <LineChartCard
+                                    title="Interest Received vs Year"
+                                    subtitle="Total interest collected per year"
+                                    labels={seriesInterestCollectedYear.labels}
+                                    datasets={[{
+                                        label: 'Interest Received',
+                                        data: seriesInterestCollectedYear.data,
+                                        borderColor: '#8b5cf6',
+                                        backgroundColor: 'rgba(139, 92, 246, 0.12)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportYearSeries('Interest Received', 'interest_collected')}
+                                />
+
+                                <LineChartCard
+                                    title="Interest Received vs Month"
+                                    subtitle={effectiveYear ? `Monthly interest collected for ${effectiveYear}` : 'Monthly interest collected'}
+                                    labels={seriesInterestCollectedMonth.labels}
+                                    datasets={[{
+                                        label: `Interest Received (${effectiveYear || 'Year'})`,
+                                        data: seriesInterestCollectedMonth.data,
+                                        borderColor: '#7c3aed',
+                                        backgroundColor: 'rgba(124, 58, 237, 0.10)',
+                                        tension: 0.35,
+                                        borderWidth: 2,
+                                        pointRadius: 2,
+                                        pointHoverRadius: 5,
+                                        fill: true
+                                    }]}
+                                    height={280}
+                                    onExport={() => exportMonthSeries('Interest Received', 'interest_collected', effectiveYear)}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Performance by Category Table */}
+                    <div className="card" style={{ marginTop: '1.5rem' }}>
+                        <div className="card-header">
+                            <h3 className="card-title">Performance by Loan Category</h3>
+                            <button
+                                className="btn btn-ghost"
+                                style={{ padding: '0.5rem 0.9rem' }}
+                                onClick={() => {
+                                    downloadCsv({
+                                        filename: `performance_by_category_${new Date().toISOString().slice(0, 10)}.csv`,
+                                        headers: ['Category', 'Loans', 'Active', 'Disbursed', 'Collected', 'Outstanding', 'Interest', 'Recovery %'],
+                                        rows: ['KULU', 'DEBT', 'OTHER'].map(type => ([
+                                            type,
+                                            by_type?.[type]?.loan_count ?? 0,
+                                            by_type?.[type]?.active_loans ?? 0,
+                                            by_type?.[type]?.principal_disbursed ?? 0,
+                                            by_type?.[type]?.principal_collected ?? 0,
+                                            by_type?.[type]?.principal_outstanding ?? 0,
+                                            by_type?.[type]?.interest_collected ?? 0,
+                                            by_type?.[type]?.recovery_rate ?? 0
+                                        ]))
+                                    });
+                                }}
+                            >
+                                📥 Export
+                            </button>
+                        </div>
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Category</th>
+                                        <th>Loans</th>
+                                        <th>Active</th>
+                                        <th>Disbursed</th>
+                                        <th>Collected</th>
+                                        <th>Outstanding</th>
+                                        <th>Interest</th>
+                                        <th>Recovery %</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {['KULU', 'DEBT', 'OTHER'].map(type => by_type[type] && (
+                                        <tr key={type}>
+                                            <td>
+                                                <span className={`badge ${type === 'KULU' ? 'badge-info' : type === 'DEBT' ? 'badge-warning' : ''}`}
+                                                    style={type === 'OTHER' ? { background: '#e5e7eb', color: '#374151' } : {}}>
+                                                    {type}
+                                                </span>
+                                            </td>
+                                            <td>{by_type[type].loan_count}</td>
+                                            <td>{by_type[type].active_loans}</td>
+                                            <td>{formatCurrency(by_type[type].principal_disbursed)}</td>
+                                            <td style={{ color: 'var(--success-color)' }}>{formatCurrency(by_type[type].principal_collected)}</td>
+                                            <td style={{ color: 'var(--warning-color)' }}>{formatCurrency(by_type[type].principal_outstanding)}</td>
+                                            <td style={{ color: '#8b5cf6' }}>{formatCurrency(by_type[type].interest_collected)}</td>
+                                            <td>
+                                                <span className={`badge ${by_type[type].recovery_rate > 50 ? 'badge-success' : by_type[type].recovery_rate > 30 ? 'badge-warning' : 'badge-danger'}`}>
+                                                    {by_type[type].recovery_rate.toFixed(1)}%
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Customers Component
+        function Customers() {
+            const [customers, setCustomers] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [search, setSearch] = useState('');
+            const [showModal, setShowModal] = useState(false);
+            const [formData, setFormData] = useState({
+                name: '',
+                phone: '',
+                email: '',
+                address: '',
+                id_proof_type: '',
+                id_proof_number: '',
+                notes: ''
+            });
+
+            useEffect(() => {
+                loadCustomers();
+            }, []);
+
+            const loadCustomers = async () => {
+                try {
+                    const data = await api.getCustomers({ search });
+                    setCustomers(data);
+                } catch (error) {
+                    console.error('Failed to load customers:', error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    await api.createCustomer(formData);
+                    setShowModal(false);
+                    setFormData({
+                        name: '',
+                        phone: '',
+                        email: '',
+                        address: '',
+                        id_proof_type: '',
+                        id_proof_number: '',
+                        notes: ''
+                    });
+                    loadCustomers();
+                } catch (error) {
+                    console.error('Failed to create customer:', error);
+                    alert('Failed to create customer');
+                }
+            };
+
+            useEffect(() => {
+                const timeoutId = setTimeout(() => {
+                    loadCustomers();
+                }, 300);
+                return () => clearTimeout(timeoutId);
+            }, [search]);
+
+            if (loading) {
+                return <div className="loading"><div className="spinner"></div><p>Loading customers...</p></div>;
+            }
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                                <h2>Customer Management</h2>
+                                <p>Manage your customer database</p>
+                            </div>
+                            <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+                                + Add Customer
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="search-box">
+                            <span className="search-icon">🔍</span>
+                            <input
+                                type="text"
+                                className="search-input"
+                                placeholder="Search by name, phone, or ID..."
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                            />
+                        </div>
+
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Customer ID</th>
+                                        <th>Name</th>
+                                        <th>Phone</th>
+                                        <th>Address</th>
+                                        <th>Status</th>
+                                        <th>Created Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {customers.map(customer => (
+                                        <tr key={customer.customer_id}>
+                                            <td><strong>{customer.customer_id}</strong></td>
+                                            <td>{customer.name}</td>
+                                            <td>{customer.phone}</td>
+                                            <td>{customer.address}</td>
+                                            <td>
+                                                <span className={`badge ${customer.status === 'ACTIVE' ? 'badge-success' : 'badge-danger'
+                                                    }`}>
+                                                    {customer.status}
+                                                </span>
+                                            </td>
+                                            <td>{formatDate(customer.created_date)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {showModal && (
+                        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+                            <div className="modal" onClick={(e) => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <h3 className="modal-title">Add New Customer</h3>
+                                    <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                                </div>
+                                <form onSubmit={handleSubmit}>
+                                    <div className="form-group">
+                                        <label className="form-label">Full Name *</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            required
+                                            value={formData.name}
+                                            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Phone *</label>
+                                            <input
+                                                type="tel"
+                                                className="form-input"
+                                                required
+                                                value={formData.phone}
+                                                onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                                            />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Email</label>
+                                            <input
+                                                type="email"
+                                                className="form-input"
+                                                value={formData.email}
+                                                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Address</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={formData.address}
+                                            onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">ID Proof Type</label>
+                                            <select
+                                                className="form-input"
+                                                value={formData.id_proof_type}
+                                                onChange={(e) => setFormData({ ...formData, id_proof_type: e.target.value })}
+                                            >
+                                                <option value="">Select Type</option>
+                                                <option value="Aadhar">Aadhar Card</option>
+                                                <option value="PAN">PAN Card</option>
+                                                <option value="Passport">Passport</option>
+                                                <option value="DrivingLicense">Driving License</option>
+                                            </select>
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">ID Proof Number</label>
+                                            <input
+                                                type="text"
+                                                className="form-input"
+                                                value={formData.id_proof_number}
+                                                onChange={(e) => setFormData({ ...formData, id_proof_number: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Notes</label>
+                                        <textarea
+                                            className="form-input"
+                                            rows="3"
+                                            value={formData.notes}
+                                            onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                                        ></textarea>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                                        <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>
+                                            Cancel
+                                        </button>
+                                        <button type="submit" className="btn btn-primary">
+                                            Create Customer
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Loans Component
+        function Loans() {
+            const [loans, setLoans] = useState([]);
+            const [customers, setCustomers] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [showModal, setShowModal] = useState(false);
+            const [showWaiverModal, setShowWaiverModal] = useState(false);
+            const [selectedLoan, setSelectedLoan] = useState(null);
+            const [waiverData, setWaiverData] = useState({ waived_amount: '', reason: '' });
+            const [formData, setFormData] = useState({
+                customer_id: '',
+                principal_amount: '',
+                interest_rate: '0.02',
+                loan_type: 'PERSONAL',
+                transaction_type: 'KULU',
+                start_date: new Date().toISOString().split('T')[0],
+                tenure_months: '',
+                notes: ''
+            });
+
+            useEffect(() => {
+                loadData();
+            }, []);
+
+            const loadData = async () => {
+                try {
+                    const [loansData, customersData] = await Promise.all([
+                        api.getLoans(),
+                        api.getCustomers()
+                    ]);
+                    setLoans(loansData);
+                    setCustomers(customersData);
+                } catch (error) {
+                    console.error('Failed to load data:', error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    await api.createLoan({
+                        ...formData,
+                        principal_amount: parseFloat(formData.principal_amount),
+                        interest_rate: parseFloat(formData.interest_rate),
+                        tenure_months: formData.tenure_months ? parseInt(formData.tenure_months) : null
+                    });
+                    setShowModal(false);
+                    setFormData({
+                        customer_id: '',
+                        principal_amount: '',
+                        interest_rate: '0.02',
+                        loan_type: 'PERSONAL',
+                        transaction_type: 'KULU',
+                        start_date: new Date().toISOString().split('T')[0],
+                        tenure_months: '',
+                        notes: ''
+                    });
+                    loadData();
+                } catch (error) {
+                    console.error('Failed to create loan:', error);
+                    alert('Failed to create loan');
+                }
+            };
+
+            const handleWaiver = async (e) => {
+                e.preventDefault();
+                try {
+                    const result = await api.waiveInterest(selectedLoan.loan_id, {
+                        waived_amount: parseFloat(waiverData.waived_amount),
+                        reason: waiverData.reason
+                    });
+                    alert(`Waiver applied successfully!\nOriginal Interest: ${formatCurrency(result.original_interest)}\nTotal Waived: ${formatCurrency(result.total_waived)}\nEffective Interest Due: ${formatCurrency(result.effective_interest_due)}`);
+                    setShowWaiverModal(false);
+                    setWaiverData({ waived_amount: '', reason: '' });
+                    setSelectedLoan(null);
+                    loadData();
+                } catch (error) {
+                    console.error('Failed to apply waiver:', error);
+                    alert('Failed to apply waiver: ' + (error.response?.data?.detail || error.message));
+                }
+            };
+
+            if (loading) {
+                return <div className="loading"><div className="spinner"></div><p>Loading loans...</p></div>;
+            }
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                                <h2>Loan Management</h2>
+                                <p>Track and manage all loans</p>
+                            </div>
+                            <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+                                + New Loan
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Loan ID</th>
+                                        <th>Customer ID</th>
+                                        <th>Category</th>
+                                        <th>Principal</th>
+                                        <th>Principal Paid</th>
+                                        <th>Interest Paid</th>
+                                        <th>Rate</th>
+                                        <th>Start Date</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {loans.map(loan => (
+                                        <tr key={loan.loan_id}>
+                                            <td><strong>{loan.loan_id}</strong></td>
+                                            <td>{loan.customer_id}</td>
+                                            <td>
+                                                <span className={`badge ${loan.loan_type === 'KULU' ? 'badge-info' : 'badge-warning'}`}>
+                                                    {loan.loan_type || 'DEBT'}
+                                                </span>
+                                            </td>
+                                            <td>{formatCurrency(loan.principal_amount)}</td>
+                                            <td style={{ color: '#16a34a', fontWeight: '600' }}>{formatCurrency(loan.principal_paid || 0)}</td>
+                                            <td style={{ color: '#2563eb', fontWeight: '600' }}>{formatCurrency(loan.interest_paid || 0)}</td>
+                                            <td>{(loan.interest_rate * 100).toFixed(1)}%</td>
+                                            <td>{formatDate(loan.start_date)}</td>
+                                            <td>
+                                                <span className={`badge ${loan.status === 'ACTIVE' ? 'badge-success' :
+                                                    loan.status === 'COMPLETED' ? 'badge-info' : 'badge-danger'
+                                                    }`}>
+                                                    {loan.status}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                {loan.status === 'ACTIVE' && (
+                                                    <button
+                                                        className="btn btn-secondary"
+                                                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                                                        onClick={() => {
+                                                            setSelectedLoan(loan);
+                                                            setShowWaiverModal(true);
+                                                        }}
+                                                    >
+                                                        Waive Interest
+                                                    </button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {showModal && (
+                        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+                            <div className="modal" onClick={(e) => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <h3 className="modal-title">Create New Loan</h3>
+                                    <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                                </div>
+                                <form onSubmit={handleSubmit}>
+                                    <div className="form-group">
+                                        <label className="form-label">Customer *</label>
+                                        <select
+                                            className="form-input"
+                                            required
+                                            value={formData.customer_id}
+                                            onChange={(e) => setFormData({ ...formData, customer_id: e.target.value })}
+                                        >
+                                            <option value="">Select Customer</option>
+                                            {customers.filter(c => c.status === 'ACTIVE').map(customer => (
+                                                <option key={customer.customer_id} value={customer.customer_id}>
+                                                    {customer.customer_id} - {customer.name}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Principal Amount *</label>
+                                            <input
+                                                type="number"
+                                                className="form-input"
+                                                required
+                                                step="0.01"
+                                                value={formData.principal_amount}
+                                                onChange={(e) => setFormData({ ...formData, principal_amount: e.target.value })}
+                                            />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Interest Rate (Monthly) *</label>
+                                            <input
+                                                type="number"
+                                                className="form-input"
+                                                required
+                                                step="0.001"
+                                                value={formData.interest_rate}
+                                                onChange={(e) => setFormData({ ...formData, interest_rate: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Loan Type *</label>
+                                            <select
+                                                className="form-input"
+                                                required
+                                                value={formData.loan_type}
+                                                onChange={(e) => setFormData({ ...formData, loan_type: e.target.value })}
+                                            >
+                                                <option value="PERSONAL">Personal</option>
+                                                <option value="BUSINESS">Business</option>
+                                                <option value="MORTGAGE">Mortgage</option>
+                                                <option value="OTHER">Other</option>
+                                            </select>
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Tenure (Months)</label>
+                                            <input
+                                                type="number"
+                                                className="form-input"
+                                                value={formData.tenure_months}
+                                                onChange={(e) => setFormData({ ...formData, tenure_months: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Transaction Category *</label>
+                                        <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                                <input
+                                                    type="radio"
+                                                    name="transaction_type"
+                                                    value="KULU"
+                                                    checked={formData.transaction_type === 'KULU'}
+                                                    onChange={(e) => setFormData({ ...formData, transaction_type: e.target.value })}
+                                                />
+                                                <span style={{ padding: '0.25rem 0.75rem', background: '#dbeafe', color: '#1e40af', borderRadius: '4px', fontWeight: '600' }}>KULU</span>
+                                            </label>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                                <input
+                                                    type="radio"
+                                                    name="transaction_type"
+                                                    value="DEBT"
+                                                    checked={formData.transaction_type === 'DEBT'}
+                                                    onChange={(e) => setFormData({ ...formData, transaction_type: e.target.value })}
+                                                />
+                                                <span style={{ padding: '0.25rem 0.75rem', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '600' }}>DEBT</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Start Date *</label>
+                                        <input
+                                            type="date"
+                                            className="form-input"
+                                            required
+                                            value={formData.start_date}
+                                            onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Notes</label>
+                                        <textarea
+                                            className="form-input"
+                                            rows="3"
+                                            value={formData.notes}
+                                            onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                                        ></textarea>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                                        <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>
+                                            Cancel
+                                        </button>
+                                        <button type="submit" className="btn btn-primary">
+                                            Create Loan
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {showWaiverModal && selectedLoan && (
+                        <div className="modal-overlay" onClick={() => { setShowWaiverModal(false); setSelectedLoan(null); }}>
+                            <div className="modal" onClick={(e) => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <h3 className="modal-title">Waive Interest - {selectedLoan.loan_id}</h3>
+                                    <button className="modal-close" onClick={() => { setShowWaiverModal(false); setSelectedLoan(null); }}>×</button>
+                                </div>
+                                <div style={{ background: '#f0fdf4', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' }}>
+                                    <p style={{ margin: 0, fontSize: '0.875rem', color: '#166534' }}>
+                                        <strong>Principal:</strong> {formatCurrency(selectedLoan.principal_amount)} |
+                                        <strong> Rate:</strong> {(selectedLoan.interest_rate * 100).toFixed(2)}%/month |
+                                        <strong> Category:</strong> {selectedLoan.transaction_type || 'OTHER'}
+                                    </p>
+                                    {selectedLoan.waived_interest_amount > 0 && (
+                                        <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.875rem', color: '#ca8a04' }}>
+                                            <strong>Previously Waived:</strong> {formatCurrency(selectedLoan.waived_interest_amount)}
+                                        </p>
+                                    )}
+                                </div>
+                                <form onSubmit={handleWaiver}>
+                                    <div className="form-group">
+                                        <label className="form-label">Amount to Waive *</label>
+                                        <input
+                                            type="number"
+                                            className="form-input"
+                                            required
+                                            step="0.01"
+                                            min="0.01"
+                                            placeholder="Enter waiver amount"
+                                            value={waiverData.waived_amount}
+                                            onChange={(e) => setWaiverData({ ...waiverData, waived_amount: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Reason for Waiver *</label>
+                                        <select
+                                            className="form-input"
+                                            required
+                                            value={waiverData.reason}
+                                            onChange={(e) => setWaiverData({ ...waiverData, reason: e.target.value })}
+                                        >
+                                            <option value="">Select Reason</option>
+                                            <option value="Early Payment Discount">Early Payment Discount</option>
+                                            <option value="Customer Loyalty">Customer Loyalty</option>
+                                            <option value="Financial Hardship">Financial Hardship</option>
+                                            <option value="Negotiated Settlement">Negotiated Settlement</option>
+                                            <option value="Goodwill Gesture">Goodwill Gesture</option>
+                                            <option value="Processing Error Correction">Processing Error Correction</option>
+                                            <option value="Other">Other</option>
+                                        </select>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                                        <button type="button" className="btn btn-secondary" onClick={() => { setShowWaiverModal(false); setSelectedLoan(null); }}>
+                                            Cancel
+                                        </button>
+                                        <button type="submit" className="btn btn-warning" style={{ background: '#eab308', color: '#422006' }}>
+                                            Apply Waiver
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Payments Component
+        function Payments() {
+            const [customers, setCustomers] = useState([]);
+            const [loans, setLoans] = useState([]);
+            const [selectedCustomer, setSelectedCustomer] = useState('');
+            const [selectedLoan, setSelectedLoan] = useState('');
+            const [loanSummary, setLoanSummary] = useState(null);
+            const [recentPayments, setRecentPayments] = useState([]);
+            const [formData, setFormData] = useState({
+                payment_date: new Date().toISOString().split('T')[0],
+                amount: '',
+                payment_type: 'INTEREST',
+                payment_method: 'CASH',
+                reference_number: '',
+                notes: ''
+            });
+
+            useEffect(() => {
+                loadCustomers();
+            }, []);
+
+            useEffect(() => {
+                if (selectedCustomer) {
+                    loadCustomerLoans(selectedCustomer);
+                }
+            }, [selectedCustomer]);
+
+            useEffect(() => {
+                if (selectedLoan) {
+                    loadLoanSummary(selectedLoan);
+                    loadPayments(selectedLoan);
+                }
+            }, [selectedLoan]);
+
+            const loadCustomers = async () => {
+                try {
+                    const data = await api.getCustomers({ status: 'ACTIVE' });
+                    setCustomers(data);
+                } catch (error) {
+                    console.error('Failed to load customers:', error);
+                }
+            };
+
+            const loadCustomerLoans = async (customerId) => {
+                try {
+                    const data = await api.getLoans({ customer_id: customerId, status: 'ACTIVE' });
+                    setLoans(data);
+                    if (data.length > 0) {
+                        setSelectedLoan(data[0].loan_id);
+                    }
+                } catch (error) {
+                    console.error('Failed to load loans:', error);
+                }
+            };
+
+            const loadLoanSummary = async (loanId) => {
+                try {
+                    const data = await api.getLoanSummary(loanId);
+                    setLoanSummary(data);
+                } catch (error) {
+                    console.error('Failed to load loan summary:', error);
+                }
+            };
+
+            const loadPayments = async (loanId) => {
+                try {
+                    const data = await api.getPayments({ loan_id: loanId });
+                    setRecentPayments(data.slice(0, 10));
+                } catch (error) {
+                    console.error('Failed to load payments:', error);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    await api.createPayment({
+                        ...formData,
+                        loan_id: selectedLoan,
+                        customer_id: selectedCustomer,
+                        amount: parseFloat(formData.amount)
+                    });
+                    setFormData({
+                        payment_date: new Date().toISOString().split('T')[0],
+                        amount: '',
+                        payment_type: 'INTEREST',
+                        payment_method: 'CASH',
+                        reference_number: '',
+                        notes: ''
+                    });
+                    loadLoanSummary(selectedLoan);
+                    loadPayments(selectedLoan);
+                    alert('Payment recorded successfully!');
+                } catch (error) {
+                    console.error('Failed to record payment:', error);
+                    alert('Failed to record payment');
+                }
+            };
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <h2>Payment Entry</h2>
+                        <p>Record customer payments</p>
+                    </div>
+
+                    <div className="card">
+                        <div className="card-header">
+                            <h3 className="card-title">Select Customer & Loan</h3>
+                        </div>
+                        <div className="form-row">
+                            <div className="form-group">
+                                <label className="form-label">Customer</label>
+                                <select
+                                    className="form-input"
+                                    value={selectedCustomer}
+                                    onChange={(e) => setSelectedCustomer(e.target.value)}
+                                >
+                                    <option value="">Select Customer</option>
+                                    {customers.map(customer => (
+                                        <option key={customer.customer_id} value={customer.customer_id}>
+                                            {customer.customer_id} - {customer.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Loan</label>
+                                <select
+                                    className="form-input"
+                                    value={selectedLoan}
+                                    onChange={(e) => setSelectedLoan(e.target.value)}
+                                    disabled={!selectedCustomer}
+                                >
+                                    <option value="">Select Loan</option>
+                                    {loans.map(loan => (
+                                        <option key={loan.loan_id} value={loan.loan_id}>
+                                            {loan.loan_id} - {formatCurrency(loan.principal_amount)}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    {loanSummary && (
+                        <>
+                            <div className="loan-summary-panel">
+                                <h3 style={{ marginBottom: '1rem' }}>Loan Summary - {loanSummary.customer_name}</h3>
+                                <div className="loan-summary-grid">
+                                    <div className="loan-summary-item">
+                                        <h4>Principal Amount</h4>
+                                        <p>{formatCurrency(loanSummary.principal_amount)}</p>
+                                    </div>
+                                    <div className="loan-summary-item">
+                                        <h4>Outstanding Balance</h4>
+                                        <p>{formatCurrency(loanSummary.outstanding_balance)}</p>
+                                    </div>
+                                    <div className="loan-summary-item">
+                                        <h4>Principal Paid</h4>
+                                        <p>{formatCurrency(loanSummary.principal_paid)}</p>
+                                    </div>
+                                    <div className="loan-summary-item">
+                                        <h4>Interest Paid</h4>
+                                        <p>{formatCurrency(loanSummary.interest_paid)}</p>
+                                    </div>
+                                    <div className="loan-summary-item">
+                                        <h4>Interest Accrued</h4>
+                                        <p>{formatCurrency(loanSummary.total_interest_accrued)}</p>
+                                    </div>
+                                    <div className="loan-summary-item">
+                                        <h4>Days Active</h4>
+                                        <p>{loanSummary.days_active} days</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="card">
+                                <div className="card-header">
+                                    <h3 className="card-title">Record Payment</h3>
+                                </div>
+                                <form onSubmit={handleSubmit}>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Payment Date *</label>
+                                            <input
+                                                type="date"
+                                                className="form-input"
+                                                required
+                                                value={formData.payment_date}
+                                                onChange={(e) => setFormData({ ...formData, payment_date: e.target.value })}
+                                            />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Amount *</label>
+                                            <input
+                                                type="number"
+                                                className="form-input"
+                                                required
+                                                step="0.01"
+                                                value={formData.amount}
+                                                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Payment Type *</label>
+                                            <select
+                                                className="form-input"
+                                                required
+                                                value={formData.payment_type}
+                                                onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
+                                            >
+                                                <option value="PRINCIPAL">Principal</option>
+                                                <option value="INTEREST">Interest</option>
+                                                <option value="BOTH">Both</option>
+                                            </select>
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Payment Method *</label>
+                                            <select
+                                                className="form-input"
+                                                required
+                                                value={formData.payment_method}
+                                                onChange={(e) => setFormData({ ...formData, payment_method: e.target.value })}
+                                            >
+                                                <option value="CASH">Cash</option>
+                                                <option value="CHEQUE">Cheque</option>
+                                                <option value="BANK_TRANSFER">Bank Transfer</option>
+                                                <option value="UPI">UPI</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Reference Number</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={formData.reference_number}
+                                            onChange={(e) => setFormData({ ...formData, reference_number: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Notes</label>
+                                        <textarea
+                                            className="form-input"
+                                            rows="2"
+                                            value={formData.notes}
+                                            onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                                        ></textarea>
+                                    </div>
+                                    <button type="submit" className="btn btn-success">
+                                        Record Payment
+                                    </button>
+                                </form>
+                            </div>
+
+                            {recentPayments.length > 0 && (
+                                <div className="card">
+                                    <div className="card-header">
+                                        <h3 className="card-title">Recent Payments</h3>
+                                    </div>
+                                    <div className="table-container">
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Payment ID</th>
+                                                    <th>Date</th>
+                                                    <th>Amount</th>
+                                                    <th>Type</th>
+                                                    <th>Method</th>
+                                                    <th>Notes</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {recentPayments.map(payment => (
+                                                    <tr key={payment.payment_id}>
+                                                        <td><strong>{payment.payment_id}</strong></td>
+                                                        <td>{formatDate(payment.payment_date)}</td>
+                                                        <td>{formatCurrency(payment.amount)}</td>
+                                                        <td>
+                                                            <span className={`badge ${payment.payment_type === 'PRINCIPAL' ? 'badge-info' :
+                                                                payment.payment_type === 'INTEREST' ? 'badge-success' : 'badge-warning'
+                                                                }`}>
+                                                                {payment.payment_type}
+                                                            </span>
+                                                        </td>
+                                                        <td>{payment.payment_method}</td>
+                                                        <td>{payment.notes || '-'}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        // Capital Management Component
+        function Capital() {
+            const [injections, setInjections] = useState([]);
+            const [summary, setSummary] = useState(null);
+            const [showModal, setShowModal] = useState(false);
+            const [formData, setFormData] = useState({
+                source_type: 'SALARY',
+                amount: '',
+                injection_date: new Date().toISOString().split('T')[0],
+                description: ''
+            });
+
+            useEffect(() => { loadData(); }, []);
+
+            const loadData = async () => {
+                try {
+                    const [injectionsData, summaryData] = await Promise.all([
+                        api.getCapitalInjections(),
+                        api.getCapitalSummary()
+                    ]);
+                    setInjections(injectionsData);
+                    setSummary(summaryData);
+                } catch (error) {
+                    console.error('Failed to load capital data:', error);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    await api.createCapitalInjection({
+                        ...formData,
+                        amount: parseFloat(formData.amount)
+                    });
+                    setShowModal(false);
+                    setFormData({ source_type: 'SALARY', amount: '', injection_date: new Date().toISOString().split('T')[0], description: '' });
+                    loadData();
+                } catch (error) {
+                    alert('Failed to record capital injection');
+                }
+            };
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                                <h2>Capital Management</h2>
+                                <p>Track capital injections and utilization</p>
+                            </div>
+                            <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Add Capital</button>
+                        </div>
+                    </div>
+
+                    {summary && (
+                        <div className="stats-grid">
+                            <div className="stat-card">
+                                <div className="stat-label">Total Capital Injected</div>
+                                <div className="stat-value">{formatCurrency(summary.total_injected)}</div>
+                            </div>
+                            <div className="stat-card success">
+                                <div className="stat-label">Available Capital</div>
+                                <div className="stat-value">{formatCurrency(summary.available_capital)}</div>
+                            </div>
+                            <div className="stat-card warning">
+                                <div className="stat-label">Capital Utilized</div>
+                                <div className="stat-value">{formatCurrency(summary.total_disbursed)}</div>
+                            </div>
+                            <div className="stat-card">
+                                <div className="stat-label">Utilization Rate</div>
+                                <div className="stat-value">{summary.utilization_percentage.toFixed(1)}%</div>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="card">
+                        <div className="card-header"><h3 className="card-title">Capital Injections History</h3></div>
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr><th>ID</th><th>Source</th><th>Amount</th><th>Date</th><th>Description</th></tr>
+                                </thead>
+                                <tbody>
+                                    {injections.map(inj => (
+                                        <tr key={inj.injection_id}>
+                                            <td><strong>{inj.injection_id}</strong></td>
+                                            <td><span className="badge badge-info">{inj.source_type}</span></td>
+                                            <td>{formatCurrency(inj.amount)}</td>
+                                            <td>{formatDate(inj.injection_date)}</td>
+                                            <td>{inj.description || '-'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {showModal && (
+                        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+                            <div className="modal" onClick={(e) => e.stopPropagation()}>
+                                <div className="modal-header">
+                                    <h3 className="modal-title">Add Capital Injection</h3>
+                                    <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                                </div>
+                                <form onSubmit={handleSubmit}>
+                                    <div className="form-group">
+                                        <label className="form-label">Source Type *</label>
+                                        <select className="form-input" required value={formData.source_type} onChange={(e) => setFormData({ ...formData, source_type: e.target.value })}>
+                                            <option value="SALARY">Salary</option>
+                                            <option value="PERSONAL">Personal Funds</option>
+                                            <option value="INVESTOR">Investor</option>
+                                            <option value="BANK_LOAN">Bank Loan</option>
+                                            <option value="OTHER">Other</option>
+                                        </select>
+                                    </div>
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label className="form-label">Amount *</label>
+                                            <input type="number" className="form-input" required step="0.01" value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} />
+                                        </div>
+                                        <div className="form-group">
+                                            <label className="form-label">Date *</label>
+                                            <input type="date" className="form-input" required value={formData.injection_date} onChange={(e) => setFormData({ ...formData, injection_date: e.target.value })} />
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Description</label>
+                                        <textarea className="form-input" rows="2" value={formData.description} onChange={(e) => setFormData({ ...formData, description: e.target.value })}></textarea>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                                        <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
+                                        <button type="submit" className="btn btn-primary">Add Capital</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Reports Component
+        function Reports() {
+            const [txTypeReport, setTxTypeReport] = useState(null);
+            const [profitReport, setProfitReport] = useState(null);
+            const [exposure, setExposure] = useState([]);
+            const [loanList, setLoanList] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [customers, setCustomers] = useState([]);
+            const [filters, setFilters] = useState({
+                customer_id: '',
+                start_date: '',
+                end_date: ''
+            });
+            const [sortConfig, setSortConfig] = useState({ key: null, direction: 'ascending' });
+
+            useEffect(() => {
+                loadCustomers();
+                loadReports();
+            }, []);
+
+            useEffect(() => {
+                loadReports();
+            }, [filters]);
+
+            const loadCustomers = async () => {
+                try {
+                    const data = await api.getCustomers();
+                    setCustomers(data);
+                } catch (error) {
+                    console.error('Failed to load customers:', error);
+                }
+            };
+
+            const loadReports = async () => {
+                setLoading(true);
+                try {
+                    const [txData, profitData, exposureData, loansData] = await Promise.all([
+                        api.getReportByTransactionType(filters),
+                        api.getProfitabilityReport(filters),
+                        api.getCustomerExposure(filters),
+                        api.getLoans()
+                    ]);
+                    setTxTypeReport(txData);
+                    setProfitReport(profitData);
+                    setExposure(exposureData);
+
+                    // Filter loans for the report based on customer
+                    let filteredLoans = loansData;
+                    if (filters.customer_id) {
+                        filteredLoans = filteredLoans.filter(l => l.customer_id === filters.customer_id);
+                    }
+                    if (filters.loan_status && filters.loan_status !== 'ALL') {
+                        filteredLoans = filteredLoans.filter(l => l.status === filters.loan_status);
+                    }
+                    // Sort by start date desc
+                    filteredLoans.sort((a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0));
+                    setLoanList(filteredLoans);
+                } catch (error) {
+                    console.error('Failed to load reports:', error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const requestSort = (key) => {
+                let direction = 'ascending';
+                if (sortConfig.key === key && sortConfig.direction === 'ascending') {
+                    direction = 'descending';
+                }
+                setSortConfig({ key, direction });
+            };
+
+            const sortedExposure = React.useMemo(() => {
+                let sortableItems = [...exposure];
+                if (sortConfig.key !== null) {
+                    sortableItems.sort((a, b) => {
+                        let aVal = a[sortConfig.key];
+                        let bVal = b[sortConfig.key];
+
+                        // Handle numeric strings vs numbers
+                        if (!isNaN(parseFloat(aVal)) && isFinite(aVal)) aVal = parseFloat(aVal);
+                        if (!isNaN(parseFloat(bVal)) && isFinite(bVal)) bVal = parseFloat(bVal);
+
+                        if (aVal < bVal) {
+                            return sortConfig.direction === 'ascending' ? -1 : 1;
+                        }
+                        if (aVal > bVal) {
+                            return sortConfig.direction === 'ascending' ? 1 : -1;
+                        }
+                        return 0;
+                    });
+                }
+                return sortableItems;
+            }, [exposure, sortConfig]);
+
+            const exportToCSV = (data, filename, headers) => {
+                const csvContent = [
+                    headers.join(','),
+                    ...data.map(row => headers.map(h => {
+                        const val = row[h.toLowerCase().replace(/ /g, '_')] ?? row[h] ?? '';
+                        return typeof val === 'string' && val.includes(',') ? `"${val}"` : val;
+                    }).join(','))
+                ].join('\n');
+                const blob = new Blob([csvContent], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${filename}_${new Date().toISOString().split('T')[0]}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const exportExposure = () => {
+                const headers = ['customer_id', 'customer_name', 'total_loans', 'active_loans', 'total_principal', 'principal_outstanding', 'interest_paid', 'risk_score'];
+                exportToCSV(exposure, 'customer_exposure', headers);
+            };
+
+            if (loading && !txTypeReport) return <div className="loading"><div className="spinner"></div><p>Loading reports...</p></div>;
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                            <div>
+                                <h2>Reports & Analytics</h2>
+                                <p>Comprehensive business intelligence</p>
+                            </div>
+
+                            {/* Filters */}
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                <select
+                                    className="form-input"
+                                    style={{ width: 'auto', padding: '0.5rem' }}
+                                    value={filters.customer_id}
+                                    onChange={(e) => setFilters({ ...filters, customer_id: e.target.value })}
+                                >
+                                    <option value="">All Customers</option>
+                                    {customers.map(c => (
+                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="date"
+                                    className="form-input"
+                                    style={{ width: 'auto', padding: '0.5rem' }}
+                                    value={filters.start_date}
+                                    onChange={(e) => setFilters({ ...filters, start_date: e.target.value })}
+                                    placeholder="Start Date"
+                                />
+                                <input
+                                    type="date"
+                                    className="form-input"
+                                    style={{ width: 'auto', padding: '0.5rem' }}
+                                    value={filters.end_date}
+                                    onChange={(e) => setFilters({ ...filters, end_date: e.target.value })}
+                                    placeholder="End Date"
+                                />
+                                <button className="btn btn-primary" onClick={loadReports} style={{ padding: '0.5rem 1rem' }}>
+                                    🔄 Refresh
+                                </button>
+                                <button className="btn btn-secondary" onClick={exportExposure} style={{ fontSize: '0.875rem' }}>
+                                    📥 Export
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {profitReport && (
+                        <div className="stats-grid">
+                            <div className="stat-card success">
+                                <div className="stat-label">Interest Collected (Profit)</div>
+                                <div className="stat-value">{formatCurrency(profitReport.interest.collected)}</div>
+                            </div>
+                            <div className="stat-card warning">
+                                <div className="stat-label">Interest Waived</div>
+                                <div className="stat-value">{formatCurrency(profitReport.interest.waived)}</div>
+                            </div>
+                            <div className="stat-card">
+                                <div className="stat-label">Interest Pending</div>
+                                <div className="stat-value">{formatCurrency(profitReport.interest.pending)}</div>
+                            </div>
+                            <div className="stat-card success">
+                                <div className="stat-label">Collection Rate</div>
+                                <div className="stat-value">{profitReport.interest.collection_rate.toFixed(1)}%</div>
+                            </div>
+                        </div>
+                    )}
+
+                    {txTypeReport && (
+                        <div className="card">
+                            <div className="card-header"><h3 className="card-title">Performance by Transaction Type</h3></div>
+                            <div className="table-container">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Category</th>
+                                            <th>Loans</th>
+                                            <th>Active</th>
+                                            <th>Disbursed</th>
+                                            <th>Collected</th>
+                                            <th>Outstanding</th>
+                                            <th>Interest</th>
+                                            <th>Waived</th>
+                                            <th>Efficiency</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {['KULU', 'DEBT', 'OTHER'].map(type => txTypeReport[type] && (
+                                            <tr key={type}>
+                                                <td><span className={`badge ${type === 'KULU' ? 'badge-info' : type === 'DEBT' ? 'badge-warning' : ''}`} style={type === 'OTHER' ? { background: '#e5e7eb', color: '#374151' } : {}}>{type}</span></td>
+                                                <td>{txTypeReport[type].loan_count}</td>
+                                                <td>{txTypeReport[type].active_loans}</td>
+                                                <td>{formatCurrency(txTypeReport[type].principal_disbursed)}</td>
+                                                <td>{formatCurrency(txTypeReport[type].principal_collected)}</td>
+                                                <td>{formatCurrency(txTypeReport[type].principal_outstanding)}</td>
+                                                <td>{formatCurrency(txTypeReport[type].interest_collected)}</td>
+                                                <td>{formatCurrency(txTypeReport[type].interest_waived)}</td>
+                                                <td><span className={`badge ${txTypeReport[type].collection_efficiency > 70 ? 'badge-success' : txTypeReport[type].collection_efficiency > 40 ? 'badge-warning' : 'badge-danger'}`}>{txTypeReport[type].collection_efficiency.toFixed(1)}%</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="card">
+                        <div className="card-header"><h3 className="card-title">Customer Exposure Analysis (Top 20)</h3></div>
+                        <div className="table-container">
+                            <table className="sortable-table">
+                                <thead>
+                                    <tr>
+                                        <th onClick={() => requestSort('customer_id')} style={{ cursor: 'pointer' }}>Customer {sortConfig.key === 'customer_id' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('customer_name')} style={{ cursor: 'pointer' }}>Name {sortConfig.key === 'customer_name' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('total_loans')} style={{ cursor: 'pointer' }}>Total Loans {sortConfig.key === 'total_loans' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('active_loans')} style={{ cursor: 'pointer' }}>Active {sortConfig.key === 'active_loans' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('total_principal')} style={{ cursor: 'pointer' }}>Principal {sortConfig.key === 'total_principal' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('principal_outstanding')} style={{ cursor: 'pointer' }}>Outstanding {sortConfig.key === 'principal_outstanding' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('interest_paid')} style={{ cursor: 'pointer' }}>Interest Paid {sortConfig.key === 'interest_paid' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                        <th onClick={() => requestSort('risk_score')} style={{ cursor: 'pointer' }}>Risk Score {sortConfig.key === 'risk_score' && (sortConfig.direction === 'ascending' ? '▲' : '▼')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {sortedExposure.slice(0, 50).map(cust => (
+                                        <tr key={cust.customer_id}>
+                                            <td><strong>{cust.customer_id}</strong></td>
+                                            <td>{cust.customer_name}</td>
+                                            <td>{cust.total_loans}</td>
+                                            <td>{cust.active_loans}</td>
+                                            <td>{formatCurrency(cust.total_principal)}</td>
+                                            <td>{formatCurrency(cust.principal_outstanding)}</td>
+                                            <td>{formatCurrency(cust.interest_paid)}</td>
+                                            <td><span className={`badge ${cust.risk_score < 0.5 ? 'badge-success' : cust.risk_score < 1 ? 'badge-warning' : 'badge-danger'}`}>{cust.risk_score.toFixed(2)}</span></td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="card-header"><h3 className="card-title">Loan Status & Category Report</h3></div>
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Loan ID</th>
+                                        <th>Customer</th>
+                                        <th>Category</th>
+                                        <th>Status</th>
+                                        <th>Principal</th>
+                                        <th>Start Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {loanList.slice(0, 50).map(loan => (
+                                        <tr key={loan.loan_id}>
+                                            <td><strong>{loan.loan_id}</strong></td>
+                                            <td>{loan.customer_name || loan.customer_id}</td>
+                                            <td>
+                                                <span className={`badge ${loan.transaction_type === 'KULU' ? 'badge-info' :
+                                                        loan.transaction_type === 'DEBT' ? 'badge-warning' : ''
+                                                    }`}>
+                                                    {loan.transaction_type || 'OTHER'}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span className={`badge ${loan.status === 'ACTIVE' ? 'badge-success' :
+                                                        loan.status === 'CLOSED' ? 'badge-secondary' : 'badge-danger'
+                                                    }`}>
+                                                    {loan.status}
+                                                </span>
+                                            </td>
+                                            <td>{formatCurrency(loan.principal_amount)}</td>
+                                            <td>{formatDate(loan.start_date)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Audit Log Component
+        function AuditLog() {
+            const [logs, setLogs] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => { loadLogs(); }, []);
+
+            const loadLogs = async () => {
+                try {
+                    const data = await api.getAuditLog({ limit: 100 });
+                    setLogs(data);
+                } catch (error) {
+                    console.error('Failed to load audit log:', error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (loading) return <div className="loading"><div className="spinner"></div><p>Loading audit log...</p></div>;
+
+            return (
+                <div>
+                    <div className="content-header">
+                        <h2>Audit Trail</h2>
+                        <p>Complete activity log for compliance and accountability</p>
+                    </div>
+
+                    <div className="card">
+                        <div className="table-container">
+                            <table>
+                                <thead>
+                                    <tr><th>ID</th><th>Entity</th><th>Entity ID</th><th>Action</th><th>User</th><th>Timestamp</th></tr>
+                                </thead>
+                                <tbody>
+                                    {logs.map(log => (
+                                        <tr key={log.log_id}>
+                                            <td><strong>{log.log_id}</strong></td>
+                                            <td><span className="badge badge-info">{log.entity_type}</span></td>
+                                            <td>{log.entity_id}</td>
+                                            <td><span className={`badge ${log.action === 'CREATE' ? 'badge-success' : log.action === 'UPDATE' ? 'badge-warning' : log.action === 'WAIVER' ? 'badge-info' : 'badge-danger'}`}>{log.action}</span></td>
+                                            <td>{log.user}</td>
+                                            <td>{log.timestamp ? new Date(log.timestamp).toLocaleString('en-IN') : '-'}</td>
+                                         </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Main App Component
+        function App() {
+            const [activeView, setActiveView] = useState('dashboard');
+
+            const renderContent = () => {
+                switch (activeView) {
+                    case 'dashboard': return <Dashboard />;
+                    case 'customers': return <Customers />;
+                    case 'loans': return <Loans />;
+                    case 'payments': return <Payments />;
+                    case 'capital': return <Capital />;
+                    case 'reports': return <Reports />;
+                    case 'audit': return <AuditLog />;
+                    default: return <Dashboard />;
+                }
+            };
+
+            return (
+                <div className="app-container">
+                    <div className="sidebar">
+                        <div className="logo-section" style={{ textAlign: 'center' }}>
+                            <div style={{
+                                width: '60px',
+                                height: '60px',
+                                borderRadius: '50%',
+                                background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                margin: '0 auto 0.75rem',
+                                fontSize: '1.75rem'
+                            }}>💎</div>
+                            <h1 style={{ fontSize: '1.25rem', fontWeight: '700', color: '#1e3a5f', marginBottom: '0.125rem' }}>Diamond Fincorp</h1>
+                            <p style={{ fontSize: '0.8rem', color: '#6b7280', fontWeight: '500' }}>Vangaram Petta</p>
+                        </div>
+                        <nav className="nav-menu">
+                            <div className={`nav-item ${activeView === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView('dashboard')}>
+                                <span className="nav-icon">📊</span><span>Dashboard</span>
+                            </div>
+                            <div className={`nav-item ${activeView === 'customers' ? 'active' : ''}`} onClick={() => setActiveView('customers')}>
+                                <span className="nav-icon">👥</span><span>Customers</span>
+                            </div>
+                            <div className={`nav-item ${activeView === 'loans' ? 'active' : ''}`} onClick={() => setActiveView('loans')}>
+                                <span className="nav-icon">💰</span><span>Loans</span>
+                            </div>
+                            <div className={`nav-item ${activeView === 'payments' ? 'active' : ''}`} onClick={() => setActiveView('payments')}>
+                                <span className="nav-icon">💳</span><span>Payments</span>
+                            </div>
+                            <div style={{ borderTop: '1px solid #e5e7eb', margin: '0.5rem 1rem' }}></div>
+                            <div className={`nav-item ${activeView === 'capital' ? 'active' : ''}`} onClick={() => setActiveView('capital')}>
+                                <span className="nav-icon">🏦</span><span>Capital</span>
+                            </div>
+                            <div className={`nav-item ${activeView === 'reports' ? 'active' : ''}`} onClick={() => setActiveView('reports')}>
+                                <span className="nav-icon">📈</span><span>Reports</span>
+                            </div>
+                            <div className={`nav-item ${activeView === 'audit' ? 'active' : ''}`} onClick={() => setActiveView('audit')}>
+                                <span className="nav-icon">📋</span><span>Audit Trail</span>
+                            </div>
+                        </nav>
+                    </div>
+                    <main className="main-content">
+                        {renderContent()}
+                    </main>
+                </div>
+            );
+        }
+
+        // Render App
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+
+</html>
