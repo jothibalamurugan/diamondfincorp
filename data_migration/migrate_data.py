@@ -6,6 +6,7 @@ Migrates existing Diamond Fincorp data to new optimized schema
 import openpyxl
 from datetime import datetime
 import sys
+import os
 
 def migrate_data(source_file, target_file):
     """Migrate data from old structure to new optimized schema"""
@@ -62,6 +63,7 @@ def migrate_data(source_file, target_file):
             row[0],  # loan_id (LoanID)
             row[1],  # customer_id (BorrowerID)
             row[3],  # principal_amount
+            0,       # add_on_principal
             row[4],  # interest_rate
             row[2] if row[2] else 'DEBT',  # loan_type
             row[5] if row[5] else datetime.now(),  # start_date
@@ -70,7 +72,15 @@ def migrate_data(source_file, target_file):
             row[6] if row[6] else '',  # fund_source
             row[8] if row[8] else datetime.now(),  # created_date
             None,    # closed_date (not in source)
-            ''       # notes
+            '',      # notes
+            row[2] if row[2] else 'DEBT',  # transaction_type
+            'subsequent_collection',       # debt_interest_mode
+            0,       # pre_deducted_interest
+            row[3],  # net_disbursed_amount
+            0,       # original_interest_amount
+            0,       # waived_interest_amount
+            '',      # waiver_reason
+            None     # waiver_date
         ])
         loan_count += 1
     
@@ -94,12 +104,15 @@ def migrate_data(source_file, target_file):
             row[2],  # customer_id (Borrower)
             row[3] if row[3] else datetime.now(),  # payment_date
             row[4],  # amount (PaymentAmount)
-            row[5] if row[5] else 'PRINCIPAL',  # payment_type
+            row[5] if row[5] else 'INTEREST',  # payment_type
             'CASH',  # payment_method (not in source, default to CASH)
             '',      # reference_number (not in source)
             row[7] if row[7] else datetime.now(),  # created_date
             'SYSTEM',  # created_by
-            row[6] if row[6] else ''  # notes (Remarks)
+            row[6] if row[6] else '',  # notes (Remarks)
+            0,       # principal_amount
+            row[4] if row[4] else 0,  # interest_amount (safe historical default)
+            'None'   # help_category
         ])
         payment_count += 1
         
@@ -120,6 +133,8 @@ def migrate_data(source_file, target_file):
             row[1].value = str(loan_count + 1)
         elif row[0].value == 'next_payment_id':
             row[1].value = str(payment_count + 1)
+        elif row[0].value == 'next_help_id':
+            row[1].value = '1'
         row[3].value = datetime.now()  # Update last_updated
     
     # Save migrated data
@@ -143,8 +158,11 @@ def migrate_data(source_file, target_file):
     }
 
 if __name__ == '__main__':
-    source = '/mnt/user-data/uploads/DIAMOND_FINCORP_DATA_.xlsm'
-    target = '/home/claude/loan_management_system/excel_schema/LoanManagement_DB.xlsx'
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    default_source = os.path.normpath(os.path.join(base_dir, '..', 'excel_schema', 'DIAMOND FINCORP DATA .xlsm'))
+    default_target = os.path.normpath(os.path.join(base_dir, '..', 'excel_schema', 'LoanManagement_DB.xlsx'))
+    source = os.environ.get('LEGACY_EXCEL_SOURCE_PATH', default_source)
+    target = os.environ.get('EXCEL_DB_PATH', default_target)
     
     try:
         stats = migrate_data(source, target)

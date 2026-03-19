@@ -40,6 +40,7 @@ def migrate_data():
         'Customers',
         'Loans',
         'Payments',
+        'Help',
         'CapitalInjections',
         'AuditLog'
     ]
@@ -57,9 +58,11 @@ def migrate_data():
             if sheet_name == 'Customers':
                 cols_map = ['customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes']
             elif sheet_name == 'Loans':
-                cols_map = ['loan_id', 'customer_id', 'principal_amount', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
+                cols_map = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
             elif sheet_name == 'Payments':
-                cols_map = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes']
+                cols_map = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category']
+            elif sheet_name == 'Help':
+                cols_map = ['help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status']
             elif sheet_name == 'CapitalInjections':
                 cols_map = ['injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date']
             elif sheet_name == 'AuditLog':

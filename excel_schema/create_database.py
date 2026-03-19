@@ -6,6 +6,7 @@ This serves as the backend database - no formulas, just clean structured data
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from datetime import datetime
+import os
 
 def create_loan_database(filename='LoanManagement_DB.xlsx'):
     """Create a clean Excel database with proper schema"""
@@ -36,6 +37,7 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'loan_id',          # Primary Key (e.g., LN001)
         'customer_id',      # Foreign Key to Customers
         'principal_amount', # Original loan amount
+        'add_on_principal', # Principal component excluded from reporting totals
         'interest_rate',    # Interest rate (monthly, stored as decimal e.g., 0.02 = 2%)
         'loan_type',        # PERSONAL/BUSINESS/MORTGAGE/OTHER
         'start_date',       # Loan disbursement date
@@ -44,7 +46,15 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'fund_source',      # Where money came from
         'created_date',     # Record creation date
         'closed_date',      # Loan closure date
-        'notes'             # Additional notes
+        'notes',            # Additional notes
+        'transaction_type', # KULU/DEBT
+        'debt_interest_mode', # upfront_deduction/subsequent_collection
+        'pre_deducted_interest', # Interest taken during disbursement for DEBT loans
+        'net_disbursed_amount', # Amount actually handed to borrower
+        'original_interest_amount',
+        'waived_interest_amount',
+        'waiver_reason',
+        'waiver_date'
     ])
     
     # ==================== PAYMENTS TABLE ====================
@@ -54,13 +64,31 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'loan_id',          # Foreign Key to Loans
         'customer_id',      # Foreign Key to Customers (denormalized for quick lookup)
         'payment_date',     # Date of payment
-        'amount',           # Payment amount
+        'amount',           # TotalAmount
         'payment_type',     # PRINCIPAL/INTEREST/BOTH
         'payment_method',   # CASH/CHEQUE/BANK_TRANSFER/UPI
         'reference_number', # Cheque/transaction reference
         'created_date',     # Record creation timestamp
         'created_by',       # User who entered the payment
-        'notes'             # Additional notes
+        'notes',            # Additional notes
+        'principal_amount', # Principal component
+        'interest_amount',  # Interest component
+        'help_category'     # Optional HELP linkage category
+    ])
+
+    # ==================== HELP TABLE ====================
+    ws_help = wb.create_sheet('HELP')
+    ws_help.append([
+        'HelpID',
+        'CustomerID',
+        'CustomerName',
+        'HelpDate',
+        'HelpAmount',
+        'HelpCategory',
+        'HelpNote',
+        'RepaymentDate',
+        'RepaymentAmount',
+        'Status'
     ])
     
     # ==================== INTEREST_RATE_CHANGES TABLE ====================
@@ -117,6 +145,7 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
     ws_config.append(['next_customer_id', '1', 'Next customer ID sequence', datetime.now()])
     ws_config.append(['next_loan_id', '1', 'Next loan ID sequence', datetime.now()])
     ws_config.append(['next_payment_id', '1', 'Next payment ID sequence', datetime.now()])
+    ws_config.append(['next_help_id', '1', 'Next help ID sequence', datetime.now()])
     
     # Format all sheets
     for sheet_name in wb.sheetnames:
@@ -154,4 +183,5 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
     return filename
 
 if __name__ == '__main__':
-    create_loan_database('/home/claude/loan_management_system/excel_schema/LoanManagement_DB.xlsx')
+    default_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LoanManagement_DB.xlsx')
+    create_loan_database(os.environ.get('EXCEL_DB_PATH', default_path))

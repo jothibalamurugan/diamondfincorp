@@ -13,6 +13,8 @@ from enum import Enum
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 import os
+import re
+import threading
 from decimal import Decimal
 import logging
 import json
@@ -25,21 +27,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-# Resolve absolute path dynamically so WSGI can find the file regardless of the cwd
+# Resolve absolute path dynamically so the workbook path stays configurable via EXCEL_DB_PATH.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Check if the file exists in the current directory (how you uploaded it)
-LOCAL_DB_PATH = os.path.join(BASE_DIR, 'LoanManagement_DB.xlsx')
-# Explicit pythonanywhere path based on user's screenshot
-PA_DB_PATH = '/home/Jothis262/backend/LoanManagement_DB.xlsx'
-# Fallback to the original schema path just in case
-DEFAULT_DB_PATH = os.path.join(BASE_DIR, '..', 'excel_schema', 'LoanManagement_DB.xlsx')
-
-if os.path.exists(PA_DB_PATH):
-    EXCEL_DB_PATH = os.environ.get('EXCEL_DB_PATH', PA_DB_PATH)
-elif os.path.exists(LOCAL_DB_PATH):
-    EXCEL_DB_PATH = os.environ.get('EXCEL_DB_PATH', LOCAL_DB_PATH)
+DEFAULT_DB_PATH = os.path.normpath(os.path.join(BASE_DIR, '..', 'excel_schema', 'LoanManagement_DB.xlsx'))
+LOCAL_DB_PATH = os.path.normpath(os.path.join(BASE_DIR, 'LoanManagement_DB.xlsx'))
+EXCEL_DB_PATH = os.environ.get('EXCEL_DB_PATH')
+if EXCEL_DB_PATH:
+    EXCEL_DB_PATH = os.path.normpath(EXCEL_DB_PATH)
 else:
-    EXCEL_DB_PATH = os.environ.get('EXCEL_DB_PATH', os.path.normpath(DEFAULT_DB_PATH))
+    EXCEL_DB_PATH = next(
+        (candidate for candidate in [DEFAULT_DB_PATH, LOCAL_DB_PATH] if os.path.exists(candidate)),
+        DEFAULT_DB_PATH
+    )
+WORKBOOK_SCHEMA_VERSION = '2026-03-19-enterprise-v1'
+
+APP_ENV = os.environ.get('APP_ENV', os.environ.get('ENV', 'development')).strip().lower()
+IS_DEVELOPMENT = APP_ENV in {'development', 'dev', 'local', 'debug'}
+
+def parse_allowed_origins() -> List[str]:
+    configured = os.environ.get('ALLOWED_ORIGINS', '').strip()
+    if configured:
+        return [origin.strip() for origin in configured.split(',') if origin.strip()]
+    return [
+        'null',
+        'http://localhost',
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://localhost:8000',
+        'http://127.0.0.1',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:8000'
+    ]
+
+def ensure_debug_access():
+    if not IS_DEVELOPMENT:
+        raise HTTPException(status_code=403, detail="Debug endpoints are disabled outside development")
 
 # Sheet name mappings - maps internal names to actual Excel sheet names
 # User's Excel uses: Loan_Master, Borrower_Master, Payment_Transactions
@@ -47,6 +70,7 @@ SHEET_NAMES = {
     'Loans': 'Loan_Master',
     'Customers': 'Borrower_Master', 
     'Payments': 'Payment_Transactions',
+    'Help': 'HELP',
     'CapitalInjections': 'CapitalInjections',
     'AuditLog': 'AuditLog',
     'SystemConfig': 'SystemConfig'
@@ -69,6 +93,8 @@ COLUMN_MAPPINGS = {
     'payment_date': ['payment_date', 'PaymentDate', 'Date', 'TransactionDate'],
     'amount': ['amount', 'Amount', 'PaymentAmount'],
     'payment_type': ['payment_type', 'PaymentType', 'Type'],
+    'principal_amount': ['principal_amount', 'PrincipalAmount', 'principal_paid', 'principal_component'],
+    'interest_amount': ['interest_amount', 'InterestAmount', 'interest_paid', 'interest_component'],
     
     # Borrower columns
     'name': ['name', 'Name', 'BorrowerName', 'CustomerName']
@@ -98,7 +124,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=parse_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -153,6 +179,7 @@ class Loan(BaseModel):
     loan_id: Optional[str] = None
     customer_id: str
     principal_amount: float
+    add_on_principal: Optional[float] = 0.0
     interest_rate: float
     loan_type: str = 'PERSONAL'
     transaction_type: str = 'KULU'  # KULU, DEBT, OTHER
@@ -160,6 +187,9 @@ class Loan(BaseModel):
     tenure_months: Optional[int] = None
     status: str = 'ACTIVE'
     fund_source: Optional[str] = None
+    debt_interest_mode: str = 'subsequent_collection'
+    pre_deducted_interest: Optional[float] = 0.0
+    net_disbursed_amount: Optional[float] = None
     original_interest_amount: Optional[float] = 0.0
     waived_interest_amount: Optional[float] = 0.0
     waiver_reason: Optional[str] = None
@@ -173,13 +203,33 @@ class Payment(BaseModel):
     loan_id: str
     customer_id: str
     payment_date: date
-    amount: float
-    payment_type: str  # PRINCIPAL/INTEREST/BOTH
+    amount: Optional[float] = None
+    total_amount: Optional[float] = None
+    principal_amount: Optional[float] = 0.0
+    interest_amount: Optional[float] = 0.0
+    payment_type: Optional[str] = None  # PRINCIPAL/INTEREST/BOTH
     payment_method: str = 'CASH'
     reference_number: Optional[str] = None
     created_date: Optional[datetime] = None
     created_by: str = 'USER'
+    help_category: Optional[str] = 'None'
+    help_note: Optional[str] = None
+    repayment_date: Optional[date] = None
+    repayment_amount: Optional[float] = None
+    help_status: Optional[str] = None
     notes: Optional[str] = None
+
+class HelpRecord(BaseModel):
+    help_id: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    help_date: date
+    help_amount: float
+    help_category: str
+    help_note: Optional[str] = None
+    repayment_date: Optional[date] = None
+    repayment_amount: Optional[float] = None
+    status: str = 'Active'
 
 class CapitalInjection(BaseModel):
     injection_id: Optional[str] = None
@@ -210,15 +260,22 @@ class LoanSummary(BaseModel):
     loan_id: str
     customer_name: str
     principal_amount: float
+    add_on_principal: float
+    effective_principal_amount: float
+    net_disbursed_amount: float
+    pre_deducted_interest: float
     total_paid: float
     principal_paid: float
     interest_paid: float
     outstanding_balance: float
     interest_rate: float
     transaction_type: str
+    debt_interest_mode: str
     status: str
-    start_date: date
-    days_active: int
+    start_date: str
+    start_date_iso: Optional[str] = None
+    months_active: int
+    days_active: Optional[int] = None
     total_interest_accrued: float
     original_interest_amount: float
     waived_interest_amount: float
@@ -256,6 +313,7 @@ class ExcelDB:
     
     def __init__(self, filepath):
         self.filepath = filepath
+        self._id_lock = threading.Lock()
         self._ensure_file_exists()
         self._ensure_schema_updated()
     
@@ -267,81 +325,125 @@ class ExcelDB:
         """Ensure new columns and sheets exist for enterprise features"""
         wb = openpyxl.load_workbook(self.filepath)
         modified = False
-        
-        # Check if Loan_Master sheet has new columns (use actual sheet name)
-        loans_sheet_name = 'Loan_Master' if 'Loan_Master' in wb.sheetnames else 'Loans'
-        ws_loans = wb[loans_sheet_name]
-        headers = [cell.value for cell in ws_loans[1]]
-        
-        new_loan_columns = [
-            'transaction_type',
-            'original_interest_amount',
-            'waived_interest_amount', 
-            'waiver_reason',
-            'waiver_date'
-        ]
-        
-        for col_name in new_loan_columns:
-            if col_name not in headers:
-                ws_loans.cell(row=1, column=len(headers)+1, value=col_name)
+        ws_config = self._get_worksheet(wb, 'SystemConfig')
+        config_rows = {
+            str(row[0].value): row
+            for row in ws_config.iter_rows(min_row=2, values_only=False)
+            if row[0].value
+        }
+        schema_row = config_rows.get('schema_version')
+        if schema_row and str(schema_row[1].value or '').strip() == WORKBOOK_SCHEMA_VERSION:
+            wb.close()
+            return
+
+        def ensure_columns(sheet_alias: str, column_defaults: Dict[str, Any]):
+            nonlocal modified
+            try:
+                ws = self._get_worksheet(wb, sheet_alias)
+            except KeyError:
+                return
+
+            headers = [cell.value for cell in ws[1]]
+            for col_name, default_value in column_defaults.items():
+                if col_name in headers:
+                    continue
+
+                col_idx = len(headers) + 1
+                ws.cell(row=1, column=col_idx, value=col_name)
                 headers.append(col_name)
                 modified = True
-                
-                # Set default values for existing rows
-                for row_idx in range(2, ws_loans.max_row + 1):
-                    if ws_loans.cell(row=row_idx, column=1).value:  # If row has data
-                        if col_name == 'transaction_type':
-                            ws_loans.cell(row=row_idx, column=len(headers), value='OTHER')
-                        elif col_name in ['original_interest_amount', 'waived_interest_amount']:
-                            ws_loans.cell(row=row_idx, column=len(headers), value=0)
-        
-        # Create CapitalInjections sheet if not exists
-        if 'CapitalInjections' not in wb.sheetnames:
-            ws_capital = wb.create_sheet('CapitalInjections')
-            ws_capital.append([
-                'injection_id',
-                'source_type',
-                'amount',
-                'injection_date',
-                'description',
-                'created_by',
-                'created_date'
-            ])
-            # Format header
-            for cell in ws_capital[1]:
+
+                for row_idx in range(2, ws.max_row + 1):
+                    if not ws.cell(row=row_idx, column=1).value:
+                        continue
+                    if callable(default_value):
+                        ws.cell(row=row_idx, column=col_idx, value=default_value(ws, row_idx))
+                    else:
+                        ws.cell(row=row_idx, column=col_idx, value=default_value)
+
+        def add_sheet(sheet_name: str, headers: List[str]):
+            nonlocal modified
+            if sheet_name in wb.sheetnames:
+                return
+
+            ws = wb.create_sheet(sheet_name)
+            ws.append(headers)
+            for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.freeze_panes = 'A2'
             modified = True
-        
-        # Create AuditLog sheet if not exists
-        if 'AuditLog' not in wb.sheetnames:
-            ws_audit = wb.create_sheet('AuditLog')
-            ws_audit.append([
-                'log_id',
-                'entity_type',
-                'entity_id',
-                'action',
-                'old_value',
-                'new_value',
-                'user',
-                'timestamp'
-            ])
-            # Format header
-            for cell in ws_audit[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+
+        ensure_columns('Loans', {
+            'add_on_principal': 0,
+            'transaction_type': 'OTHER',
+            'debt_interest_mode': 'subsequent_collection',
+            'pre_deducted_interest': 0,
+            'net_disbursed_amount': '',
+            'original_interest_amount': 0,
+            'waived_interest_amount': 0,
+            'waiver_reason': '',
+            'waiver_date': ''
+        })
+
+        ensure_columns('Payments', {
+            'principal_amount': 0,
+            'interest_amount': lambda ws, row_idx: ws.cell(row=row_idx, column=5).value or 0,
+            'help_category': 'None'
+        })
+
+        add_sheet('CapitalInjections', [
+            'injection_id',
+            'source_type',
+            'amount',
+            'injection_date',
+            'description',
+            'created_by',
+            'created_date'
+        ])
+
+        add_sheet('AuditLog', [
+            'log_id',
+            'entity_type',
+            'entity_id',
+            'action',
+            'old_value',
+            'new_value',
+            'user',
+            'timestamp'
+        ])
+
+        add_sheet('HELP', [
+            'HelpID',
+            'CustomerID',
+            'CustomerName',
+            'HelpDate',
+            'HelpAmount',
+            'HelpCategory',
+            'HelpNote',
+            'RepaymentDate',
+            'RepaymentAmount',
+            'Status'
+        ])
+
+        config_keys = list(config_rows.keys())
+
+        for config_key, description in [
+            ('next_injection_id', 'Next capital injection ID'),
+            ('next_audit_id', 'Next audit log ID'),
+            ('next_help_id', 'Next help ID')
+        ]:
+            if config_key not in config_keys:
+                ws_config.append([config_key, '1', description, datetime.now()])
+                modified = True
+        if schema_row:
+            schema_row[1].value = WORKBOOK_SCHEMA_VERSION
+            schema_row[2].value = 'Workbook schema version'
+            schema_row[3].value = datetime.now()
             modified = True
-        
-        # Add next IDs for new entities
-        ws_config = wb['SystemConfig']
-        config_keys = [row[0].value for row in ws_config.iter_rows(min_row=2)]
-        
-        if 'next_injection_id' not in config_keys:
-            ws_config.append(['next_injection_id', '1', 'Next capital injection ID', datetime.now()])
-            modified = True
-        
-        if 'next_audit_id' not in config_keys:
-            ws_config.append(['next_audit_id', '1', 'Next audit log ID', datetime.now()])
+        else:
+            ws_config.append(['schema_version', WORKBOOK_SCHEMA_VERSION, 'Workbook schema version', datetime.now()])
             modified = True
         
         if modified:
@@ -379,38 +481,40 @@ class ExcelDB:
     
     def get_next_id(self, id_type: str) -> str:
         """Get next sequential ID for customers, loans, payments, etc."""
-        wb = openpyxl.load_workbook(self.filepath)
-        ws = self._get_worksheet(wb, 'SystemConfig')
-        
-        config_map = {
-            'customer': 'next_customer_id',
-            'loan': 'next_loan_id',
-            'payment': 'next_payment_id',
-            'injection': 'next_injection_id',
-            'audit': 'next_audit_id'
-        }
-        
-        config_key = config_map.get(id_type)
-        next_num = 1
-        
-        for row in ws.iter_rows(min_row=2, values_only=False):
-            if row[0].value == config_key:
-                next_num = int(row[1].value)
-                row[1].value = str(next_num + 1)
-                row[3].value = datetime.now()
-                break
-        
-        self._save_workbook(wb)
-        
-        # Format ID
-        prefixes = {
-            'customer': 'CUST', 
-            'loan': 'LN', 
-            'payment': 'PAY',
-            'injection': 'CAP',
-            'audit': 'AUD'
-        }
-        return f"{prefixes[id_type]}{next_num:04d}"
+        with self._id_lock:
+            wb = openpyxl.load_workbook(self.filepath)
+            ws = self._get_worksheet(wb, 'SystemConfig')
+            
+            config_map = {
+                'customer': 'next_customer_id',
+                'loan': 'next_loan_id',
+                'payment': 'next_payment_id',
+                'injection': 'next_injection_id',
+                'audit': 'next_audit_id',
+                'help': 'next_help_id'
+            }
+            
+            config_key = config_map.get(id_type)
+            next_num = 1
+            
+            for row in ws.iter_rows(min_row=2, values_only=False):
+                if row[0].value == config_key:
+                    next_num = int(row[1].value)
+                    row[1].value = str(next_num + 1)
+                    row[3].value = datetime.now()
+                    break
+            
+            self._save_workbook(wb)
+            
+            prefixes = {
+                'customer': 'CUST', 
+                'loan': 'LN', 
+                'payment': 'PAY',
+                'injection': 'CAP',
+                'audit': 'AUD',
+                'help': 'HELP'
+            }
+            return f"{prefixes[id_type]}{next_num:04d}"
     
     def get_all_rows(self, sheet_name: str) -> List[Dict]:
         """Get all rows from a sheet as list of dicts"""
@@ -441,6 +545,14 @@ class ExcelDB:
         ws = self._get_worksheet(wb, sheet_name)
         ws.append(data)
         self._save_workbook(wb)
+
+    def add_dict_row(self, sheet_name: str, data: Dict[str, Any]):
+        """Add a row using the actual worksheet headers as the column order"""
+        wb = openpyxl.load_workbook(self.filepath)
+        ws = self._get_worksheet(wb, sheet_name)
+        headers = [cell.value for cell in ws[1]]
+        ws.append([data.get(header, '') for header in headers])
+        self._save_workbook(wb)
     
     def update_row(self, sheet_name: str, id_column: str, id_value: str, updates: Dict):
         """Update a row based on ID"""
@@ -459,6 +571,31 @@ class ExcelDB:
                 break
         
         self._save_workbook(wb)
+
+    def delete_row(self, sheet_name: str, id_column: str, id_value: str):
+        """Delete a row based on ID"""
+        wb = openpyxl.load_workbook(self.filepath)
+        ws = self._get_worksheet(wb, sheet_name)
+        headers = [cell.value for cell in ws[1]]
+
+        if id_column not in headers:
+            wb.close()
+            raise KeyError(f"Column '{id_column}' not found in sheet '{sheet_name}'")
+
+        id_col_idx = headers.index(id_column)
+        delete_idx = None
+
+        for row_idx in range(2, ws.max_row + 1):
+            if ws.cell(row=row_idx, column=id_col_idx + 1).value == id_value:
+                delete_idx = row_idx
+                break
+
+        if delete_idx:
+            ws.delete_rows(delete_idx, 1)
+            self._save_workbook(wb)
+        else:
+            wb.close()
+            raise KeyError(f"ID '{id_value}' not found in sheet '{sheet_name}'")
     
     def log_audit(self, entity_type: str, entity_id: str, action: str, old_value: Any = None, new_value: Any = None, user: str = 'USER'):
         """Add audit log entry"""
@@ -480,6 +617,33 @@ class ExcelDB:
 
 class PostgresDB:
     """PostgreSQL database handler with identical interface to ExcelDB"""
+    TABLE_MAP = {
+        'Customers': 'borrower_master',
+        'Loans': 'loan_master',
+        'Payments': 'payment_transactions',
+        'Help': 'help_records',
+        'CapitalInjections': 'capital_injections',
+        'AuditLog': 'audit_log',
+        'SystemConfig': 'system_config'
+    }
+    TABLE_COLUMNS = {
+        'Customers': {'customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes'},
+        'Loans': {'loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date'},
+        'Payments': {'payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category'},
+        'Help': {'help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status'},
+        'CapitalInjections': {'injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date'},
+        'AuditLog': {'log_id', 'entity_type', 'entity_id', 'action', 'old_value', 'new_value', 'user', 'timestamp'},
+        'SystemConfig': {'config_key', 'config_value', 'description', 'last_updated'}
+    }
+    COLUMN_ALIASES = {
+        'Customers': {'BorrowerID': 'customer_id', 'BorrowerName': 'name', 'Phone': 'phone', 'Address': 'address', 'IsActive': 'status', 'CreatedOn': 'created_date'},
+        'Loans': {'LoanID': 'loan_id', 'BorrowerID': 'customer_id', 'TYPE': 'transaction_type', 'PrincipalAmount': 'principal_amount', 'AddOnPrincipal': 'add_on_principal', 'InterestRate': 'interest_rate', 'StartDate': 'start_date', 'FundSourceID': 'fund_source', 'LoanStatus': 'status', 'CreatedOn': 'created_date'},
+        'Payments': {'PaymentID': 'payment_id', 'LoanID': 'loan_id', 'Borrower': 'customer_id', 'PaymentDate': 'payment_date', 'PaymentAmount': 'amount', 'PaymentType': 'payment_type', 'Remarks': 'notes', 'CreatedOn': 'created_date'},
+        'Help': {'HelpID': 'help_id', 'CustomerID': 'customer_id', 'CustomerName': 'customer_name', 'HelpDate': 'help_date', 'HelpAmount': 'help_amount', 'HelpCategory': 'help_category', 'HelpNote': 'help_note', 'RepaymentDate': 'repayment_date', 'RepaymentAmount': 'repayment_amount', 'Status': 'status'},
+        'CapitalInjections': {},
+        'AuditLog': {'user': 'user'},
+        'SystemConfig': {}
+    }
     
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -493,15 +657,23 @@ class PostgresDB:
         # It should be called explicitly from migration/setup scripts.
         
     def _get_table_name(self, sheet_name):
-        mapping = {
-            'Customers': 'borrower_master',
-            'Loans': 'loan_master',
-            'Payments': 'payment_transactions',
-            'CapitalInjections': 'capital_injections',
-            'AuditLog': 'audit_log',
-            'SystemConfig': 'system_config'
-        }
-        return mapping.get(sheet_name, sheet_name.lower())
+        if sheet_name not in self.TABLE_MAP:
+            raise ValueError(f"Unsupported sheet name: {sheet_name}")
+        return self.TABLE_MAP[sheet_name]
+
+    def _get_allowed_columns(self, sheet_name: str) -> set:
+        if sheet_name not in self.TABLE_COLUMNS:
+            raise ValueError(f"Unsupported sheet name: {sheet_name}")
+        return self.TABLE_COLUMNS[sheet_name]
+
+    def _normalize_column_name(self, sheet_name: str, column_name: str) -> str:
+        aliases = self.COLUMN_ALIASES.get(sheet_name, {})
+        if column_name in aliases:
+            return aliases[column_name]
+        lowered = column_name.strip().lower()
+        if lowered in self._get_allowed_columns(sheet_name):
+            return lowered
+        return column_name
 
     def _ensure_schema(self):
         """Create tables if they don't exist"""
@@ -528,12 +700,16 @@ class PostgresDB:
                     loan_id VARCHAR(50) PRIMARY KEY,
                     customer_id VARCHAR(50),
                     principal_amount FLOAT,
+                    add_on_principal FLOAT,
                     interest_rate FLOAT,
                     loan_type VARCHAR(50),
                     start_date DATE,
                     tenure_months VARCHAR(50),
                     status VARCHAR(50),
                     fund_source VARCHAR(100),
+                    debt_interest_mode VARCHAR(50),
+                    pre_deducted_interest FLOAT,
+                    net_disbursed_amount FLOAT,
                     created_date TIMESTAMP,
                     closed_date TIMESTAMP,
                     notes TEXT,
@@ -553,12 +729,30 @@ class PostgresDB:
                     customer_id VARCHAR(50),
                     payment_date DATE,
                     amount FLOAT,
+                    principal_amount FLOAT,
+                    interest_amount FLOAT,
                     payment_type VARCHAR(50),
                     payment_method VARCHAR(50),
                     reference_number VARCHAR(255),
                     created_date TIMESTAMP,
                     created_by VARCHAR(100),
+                    help_category VARCHAR(100),
                     notes TEXT
+                )
+            '''))
+
+            conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS help_records (
+                    help_id VARCHAR(50) PRIMARY KEY,
+                    customer_id VARCHAR(50),
+                    customer_name VARCHAR(255),
+                    help_date DATE,
+                    help_amount FLOAT,
+                    help_category VARCHAR(100),
+                    help_note TEXT,
+                    repayment_date DATE,
+                    repayment_amount FLOAT,
+                    status VARCHAR(50)
                 )
             '''))
             
@@ -605,7 +799,8 @@ class PostgresDB:
                 ('next_loan_id', '1', 'Next loan ID'),
                 ('next_payment_id', '1', 'Next payment ID'),
                 ('next_injection_id', '1', 'Next capital injection ID'),
-                ('next_audit_id', '1', 'Next audit log ID')
+                ('next_audit_id', '1', 'Next audit log ID'),
+                ('next_help_id', '1', 'Next help ID')
             ]
             for key, val, desc in configs:
                 conn.execute(text('''
@@ -622,7 +817,8 @@ class PostgresDB:
             'loan': 'next_loan_id',
             'payment': 'next_payment_id',
             'injection': 'next_injection_id',
-            'audit': 'next_audit_id'
+            'audit': 'next_audit_id',
+            'help': 'next_help_id'
         }
         
         config_key = config_map.get(id_type)
@@ -630,22 +826,36 @@ class PostgresDB:
             raise ValueError(f"Unknown id_type: {id_type}")
             
         with self.engine.begin() as conn:
-            # We use row-level locking natively or simply update and returning
-            result = conn.execute(text("SELECT config_value FROM system_config WHERE config_key = :key"), {"key": config_key}).scalar()
-            next_num = int(result) if result else 1
-            
-            conn.execute(text('''
-                UPDATE system_config 
-                SET config_value = :new_val, last_updated = :updated 
+            result = conn.execute(text('''
+                UPDATE system_config
+                SET config_value = CAST(CAST(config_value AS INTEGER) + 1 AS TEXT),
+                    last_updated = :updated
                 WHERE config_key = :key
-            '''), {"new_val": str(next_num + 1), "updated": datetime.now(), "key": config_key})
+                RETURNING config_value
+            '''), {"updated": datetime.now(), "key": config_key}).scalar()
+
+            if result is None:
+                next_num = 1
+                conn.execute(text('''
+                    INSERT INTO system_config (config_key, config_value, description, last_updated)
+                    VALUES (:key, :value, :description, :updated)
+                    ON CONFLICT (config_key) DO NOTHING
+                '''), {
+                    "key": config_key,
+                    "value": "2",
+                    "description": f"Next {id_type} ID",
+                    "updated": datetime.now()
+                })
+            else:
+                next_num = int(result) - 1
 
         prefixes = {
             'customer': 'CUST', 
             'loan': 'LN', 
             'payment': 'PAY',
             'injection': 'CAP',
-            'audit': 'AUD'
+            'audit': 'AUD',
+            'help': 'HELP'
         }
         return f"{prefixes[id_type]}{next_num:04d}"
 
@@ -674,9 +884,11 @@ class PostgresDB:
         if sheet_name == 'Customers':
             cols = ['customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes']
         elif sheet_name == 'Loans':
-            cols = ['loan_id', 'customer_id', 'principal_amount', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
+            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
         elif sheet_name == 'Payments':
-            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes']
+            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category']
+        elif sheet_name == 'Help':
+            cols = ['help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status']
         elif sheet_name == 'CapitalInjections':
             cols = ['injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date']
         elif sheet_name == 'AuditLog':
@@ -695,6 +907,26 @@ class PostgresDB:
         with self.engine.begin() as conn:
             conn.execute(text(query), params)
 
+    def add_dict_row(self, sheet_name: str, data: Dict[str, Any]):
+        table_name = self._get_table_name(sheet_name)
+        allowed = self._get_allowed_columns(sheet_name)
+        payload = {}
+        for key, value in data.items():
+            if value in (None, ''):
+                continue
+            normalized_key = self._normalize_column_name(sheet_name, key)
+            if normalized_key in allowed:
+                payload[normalized_key] = value
+        if not payload:
+            return
+        columns = list(payload.keys())
+        placeholders = ', '.join(f':{column}' for column in columns)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"),
+                payload
+            )
+
     def add_rows(self, sheet_name: str, data_list_of_lists: List[List[Any]]):
         """Bulk insert multiple rows for faster migration."""
         if not data_list_of_lists: return
@@ -704,9 +936,11 @@ class PostgresDB:
         if sheet_name == 'Customers':
             cols = ['customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes']
         elif sheet_name == 'Loans':
-            cols = ['loan_id', 'customer_id', 'principal_amount', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
+            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
         elif sheet_name == 'Payments':
-            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes']
+            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category']
+        elif sheet_name == 'Help':
+            cols = ['help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status']
         elif sheet_name == 'CapitalInjections':
             cols = ['injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date']
         elif sheet_name == 'AuditLog':
@@ -731,21 +965,40 @@ class PostgresDB:
 
     def update_row(self, sheet_name: str, id_column: str, id_value: str, updates: Dict):
         table_name = self._get_table_name(sheet_name)
+        allowed = self._get_allowed_columns(sheet_name)
+        normalized_id_column = self._normalize_column_name(sheet_name, id_column)
+        if normalized_id_column not in allowed:
+            raise ValueError(f"Unsupported id column '{id_column}' for {sheet_name}")
         
         set_clauses = []
-        params = {id_column: id_value}
+        params = {normalized_id_column: id_value}
         
         for k, v in updates.items():
-            set_clauses.append(f"{k} = :update_{k}")
-            params[f"update_{k}"] = v
+            normalized_key = self._normalize_column_name(sheet_name, k)
+            if normalized_key not in allowed:
+                continue
+            param_key = f"update_{normalized_key}"
+            set_clauses.append(f"{normalized_key} = :{param_key}")
+            params[param_key] = v
             
         if not set_clauses:
             return
             
-        query = f"UPDATE {table_name} SET {', '.join(set_clauses)} WHERE {id_column} = :{id_column}"
+        query = f"UPDATE {table_name} SET {', '.join(set_clauses)} WHERE {normalized_id_column} = :{normalized_id_column}"
         
         with self.engine.begin() as conn:
             conn.execute(text(query), params)
+
+    def delete_row(self, sheet_name: str, id_column: str, id_value: str):
+        table_name = self._get_table_name(sheet_name)
+        normalized_id_column = self._normalize_column_name(sheet_name, id_column)
+        if normalized_id_column not in self._get_allowed_columns(sheet_name):
+            raise ValueError(f"Unsupported id column '{id_column}' for {sheet_name}")
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"DELETE FROM {table_name} WHERE {normalized_id_column} = :id_value"),
+                {"id_value": id_value}
+            )
 
     def log_audit(self, entity_type: str, entity_id: str, action: str, old_value: Any = None, new_value: Any = None, user: str = 'USER'):
         audit_id = self.get_next_id('audit')
@@ -818,10 +1071,454 @@ def get_loan_type(loan: dict) -> str:
     
     return 'OTHER'
 
+DATE_DISPLAY_FORMAT = '%d-%b-%y'
+HELP_CATEGORIES = {'Personal', 'Medical', 'Emergency', 'Business', 'Other'}
+HELP_STATUSES = {'Active', 'Settled', 'Partial'}
+DEBT_INTEREST_MODES = {'upfront_deduction', 'subsequent_collection'}
+
+def to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ''):
+            return default
+        if isinstance(value, Decimal):
+            return float(value)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ''):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+def to_optional_money(value: Any) -> Any:
+    if value in (None, ''):
+        return ''
+    return round(to_float(value), 2)
+
+def validate_phone_number(phone: str) -> str:
+    normalized = re.sub(r'[\s\-]', '', str(phone or '').strip())
+    if not re.fullmatch(r'\+?\d{10,15}', normalized):
+        raise HTTPException(status_code=400, detail="Phone number must contain 10 to 15 digits")
+    return normalized
+
+def first_present(record: Dict[str, Any], keys: List[str], default: Any = None):
+    for key in keys:
+        if key in record and record[key] not in (None, ''):
+            return record[key]
+    return default
+
+def parse_date_value(value: Any) -> Optional[date]:
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        for fmt in ('%Y-%m-%d', '%d-%b-%y', '%d-%b-%Y', '%d/%m/%Y', '%d/%m/%y'):
+            try:
+                return datetime.strptime(raw[:11], fmt).date()
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(raw[:10]).date()
+        except ValueError:
+            return None
+    return None
+
+def format_display_date(value: Any) -> str:
+    parsed = parse_date_value(value)
+    return parsed.strftime(DATE_DISPLAY_FORMAT) if parsed else ''
+
+def format_iso_date(value: Any) -> str:
+    parsed = parse_date_value(value)
+    return parsed.isoformat() if parsed else ''
+
+def title_case_status(value: Any, default: str = 'Active') -> str:
+    raw = str(value or default).strip().replace('_', ' ')
+    if not raw:
+        raw = default
+    return ' '.join(part.capitalize() for part in raw.split())
+
+def resolve_debt_interest_mode(record: Dict[str, Any]) -> str:
+    raw_mode = str(first_present(record, ['debt_interest_mode', 'DebtInterestMode'], 'subsequent_collection')).strip().lower()
+    if raw_mode not in DEBT_INTEREST_MODES:
+        raw_mode = 'subsequent_collection'
+    return raw_mode
+
+def get_raw_principal_amount(record: Dict[str, Any]) -> float:
+    return round(to_float(first_present(record, ['principal_amount', 'Principal', 'PrincipalAmount', 'Amount', 'LoanAmount'])), 2)
+
+def get_add_on_principal_amount(record: Dict[str, Any]) -> float:
+    return round(max(0, to_float(first_present(record, ['add_on_principal', 'AddOnPrincipal', 'addOnPrincipal']))), 2)
+
+def get_effective_principal_amount(record: Dict[str, Any]) -> float:
+    # BUSINESS RULE: reporting principal excludes add_on_principal while preserving the stored raw principal.
+    return round(max(0, get_raw_principal_amount(record) - get_add_on_principal_amount(record)), 2)
+
+def resolve_payment_components(payment: Dict[str, Any], remaining_principal: float) -> Dict[str, float]:
+    total_amount = round(to_float(payment.get('total_amount', payment.get('amount'))), 2)
+    principal_amount = round(max(0, to_float(payment.get('principal_amount'))), 2)
+    interest_amount = round(max(0, to_float(payment.get('interest_amount'))), 2)
+    payment_type = str(payment.get('payment_type', '') or '').strip().upper()
+
+    if total_amount <= 0 and (principal_amount > 0 or interest_amount > 0):
+        total_amount = round(principal_amount + interest_amount, 2)
+
+    if principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
+        if payment_type == 'PRINCIPAL':
+            principal_amount = min(total_amount, remaining_principal)
+        elif payment_type == 'INTEREST':
+            interest_amount = total_amount
+        else:
+            principal_amount = min(total_amount, remaining_principal)
+            interest_amount = round(max(0, total_amount - principal_amount), 2)
+    elif payment_type == 'PRINCIPAL':
+        principal_amount = min(total_amount or principal_amount, remaining_principal)
+        interest_amount = 0.0
+    elif payment_type == 'INTEREST':
+        principal_amount = 0.0
+        interest_amount = total_amount or interest_amount
+    else:
+        principal_amount = min(principal_amount, remaining_principal)
+        if total_amount > 0:
+            interest_amount = round(max(0, total_amount - principal_amount), 2)
+
+    principal_amount = round(min(principal_amount, max(0, remaining_principal)), 2)
+    if total_amount <= 0:
+        total_amount = round(principal_amount + interest_amount, 2)
+    else:
+        interest_amount = round(max(0, total_amount - principal_amount), 2)
+
+    return {
+        'principal_amount': principal_amount,
+        'interest_amount': interest_amount,
+        'total_amount': round(total_amount, 2)
+    }
+
+def build_customer_lookup(customers: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+    source = customers if customers is not None else db.get_all_rows('Customers')
+    lookup = {}
+    for record in source:
+        normalized = normalize_customer(record)
+        lookup[normalized['customer_id']] = normalized
+    return lookup
+
+def build_loan_lookup(loans: Optional[List[Dict[str, Any]]] = None, customer_lookup: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+    source = loans if loans is not None else db.get_all_rows('Loans')
+    lookup = {}
+    for record in source:
+        normalized = normalize_loan(record, customer_lookup=customer_lookup, payment_rows=[])
+        lookup[normalized['loan_id']] = normalized
+    return lookup
+
+def normalize_customer(record: Dict[str, Any]) -> Dict[str, Any]:
+    customer_id = str(first_present(record, ['customer_id', 'CustomerID', 'BorrowerID', 'BorrowerId', 'CustomerId', 'id'], '') or '')
+    name = str(first_present(record, ['name', 'Name', 'BorrowerName', 'CustomerName'], customer_id) or customer_id)
+    created_date = first_present(record, ['created_date', 'CreatedOn', 'createdDate'])
+    status = title_case_status(first_present(record, ['status', 'Status', 'IsActive'], 'ACTIVE'))
+    if str(first_present(record, ['status', 'Status'], '')).strip() == '' and str(first_present(record, ['IsActive'], '')).strip().lower() in {'yes', 'true', '1'}:
+        status = 'Active'
+    elif str(first_present(record, ['status', 'Status'], '')).strip() == '' and str(first_present(record, ['IsActive'], '')).strip():
+        status = 'Inactive'
+
+    return {
+        'id': customer_id,
+        'customer_id': customer_id,
+        'name': name,
+        'phone': str(first_present(record, ['phone', 'Phone'], '') or ''),
+        'email': str(first_present(record, ['email', 'Email'], '') or ''),
+        'address': str(first_present(record, ['address', 'Address'], '') or ''),
+        'id_proof_type': str(first_present(record, ['id_proof_type', 'IdProofType'], '') or ''),
+        'id_proof_number': str(first_present(record, ['id_proof_number', 'IdProofNumber'], '') or ''),
+        'status': status,
+        'created_date': format_display_date(created_date),
+        'created_date_iso': format_iso_date(created_date),
+        'notes': str(first_present(record, ['notes', 'Notes'], '') or '')
+    }
+
+def infer_payment_split(total_amount: float, payment_type: Optional[str], principal_amount: float, interest_amount: float) -> Dict[str, float]:
+    total = round(to_float(total_amount), 2)
+    principal = round(to_float(principal_amount), 2)
+    interest = round(to_float(interest_amount), 2)
+
+    if principal == 0 and interest == 0 and total > 0:
+        normalized_type = str(payment_type or '').strip().upper()
+        if normalized_type == 'PRINCIPAL':
+            principal = total
+        elif normalized_type == 'INTEREST':
+            interest = total
+        elif normalized_type == 'BOTH':
+            principal = total
+        else:
+            interest = total
+
+    if total == 0 and (principal > 0 or interest > 0):
+        total = round(principal + interest, 2)
+
+    if total > 0 and round(principal + interest, 2) == 0:
+        interest = total
+
+    return {
+        'principal_amount': round(principal, 2),
+        'interest_amount': round(interest, 2),
+        'total_amount': round(total, 2)
+    }
+
+def normalize_help(record: Dict[str, Any]) -> Dict[str, Any]:
+    help_date = first_present(record, ['help_date', 'HelpDate'])
+    repayment_date = first_present(record, ['repayment_date', 'RepaymentDate'])
+    status = title_case_status(first_present(record, ['status', 'Status'], 'Active'))
+    category = str(first_present(record, ['help_category', 'HelpCategory'], 'Other') or 'Other').title()
+    if category not in HELP_CATEGORIES:
+        category = 'Other'
+
+    return {
+        'help_id': str(first_present(record, ['help_id', 'HelpID'], '') or ''),
+        'customer_id': str(first_present(record, ['customer_id', 'CustomerID'], '') or ''),
+        'customer_name': str(first_present(record, ['customer_name', 'CustomerName'], '') or ''),
+        'help_date': format_display_date(help_date),
+        'help_date_iso': format_iso_date(help_date),
+        'help_amount': round(to_float(first_present(record, ['help_amount', 'HelpAmount'])), 2),
+        'help_category': category,
+        'help_note': str(first_present(record, ['help_note', 'HelpNote'], '') or ''),
+        'repayment_date': format_display_date(repayment_date),
+        'repayment_date_iso': format_iso_date(repayment_date),
+        'repayment_amount': round(to_float(first_present(record, ['repayment_amount', 'RepaymentAmount'])), 2),
+        'status': status if status in HELP_STATUSES else 'Active'
+    }
+
+def normalize_payment(record: Dict[str, Any], customer_lookup: Optional[Dict[str, Dict[str, Any]]] = None, loan_lookup: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    payment_date = first_present(record, ['payment_date', 'PaymentDate', 'Date', 'TransactionDate'])
+    customer_id = str(first_present(record, ['customer_id', 'CustomerID', 'BorrowerID', 'BorrowerId', 'Borrower'], '') or '')
+    loan_id = str(first_present(record, ['loan_id', 'LoanID', 'LoanId'], '') or '')
+    split = infer_payment_split(
+        first_present(record, ['amount', 'Amount', 'PaymentAmount', 'total_amount', 'TotalAmount'], 0),
+        first_present(record, ['payment_type', 'PaymentType', 'Type'], ''),
+        first_present(record, ['principal_amount', 'PrincipalAmount'], 0),
+        first_present(record, ['interest_amount', 'InterestAmount'], 0)
+    )
+
+    customer_name = ''
+    if customer_lookup and customer_id in customer_lookup:
+        customer_name = customer_lookup[customer_id]['name']
+    elif loan_lookup and loan_id in loan_lookup:
+        customer_name = loan_lookup[loan_id].get('customer_name', '')
+
+    payment_type = str(first_present(record, ['payment_type', 'PaymentType', 'Type'], '') or '').strip().upper()
+    if not payment_type:
+        if split['principal_amount'] > 0 and split['interest_amount'] > 0:
+            payment_type = 'BOTH'
+        elif split['principal_amount'] > 0:
+            payment_type = 'PRINCIPAL'
+        else:
+            payment_type = 'INTEREST'
+
+    return {
+        'payment_id': str(first_present(record, ['payment_id', 'PaymentID'], '') or ''),
+        'loan_id': loan_id,
+        'customer_id': customer_id,
+        'customer_name': customer_name,
+        'payment_date': format_display_date(payment_date),
+        'payment_date_iso': format_iso_date(payment_date),
+        'amount': split['total_amount'],
+        'total_amount': split['total_amount'],
+        'principal_amount': split['principal_amount'],
+        'interest_amount': split['interest_amount'],
+        'payment_type': payment_type,
+        'payment_method': str(first_present(record, ['payment_method', 'PaymentMethod'], 'CASH') or 'CASH'),
+        'reference_number': str(first_present(record, ['reference_number', 'ReferenceNumber'], '') or ''),
+        'created_date': format_display_date(first_present(record, ['created_date', 'CreatedOn'])),
+        'created_date_iso': format_iso_date(first_present(record, ['created_date', 'CreatedOn'])),
+        'created_by': str(first_present(record, ['created_by', 'CreatedBy'], 'USER') or 'USER'),
+        'help_category': str(first_present(record, ['help_category', 'HelpCategory'], 'None') or 'None'),
+        'notes': str(first_present(record, ['notes', 'Notes', 'Remarks'], '') or '')
+    }
+
+def calculate_loan_balances(loan_record: Dict[str, Any], payment_rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    effective_principal = round(to_float(loan_record.get('effective_principal_amount', loan_record.get('principal_amount'))), 2)
+    principal_paid = 0.0
+    interest_paid = 0.0
+
+    def payment_sort_key(payment: Dict[str, Any]):
+        return (
+            payment.get('payment_date_iso') or format_iso_date(payment.get('payment_date')) or '',
+            payment.get('payment_id', '')
+        )
+
+    for payment in sorted(payment_rows, key=payment_sort_key):
+        remaining = max(0, effective_principal - principal_paid)
+        split = resolve_payment_components(payment, remaining)
+        principal_paid = round(principal_paid + split['principal_amount'], 2)
+        interest_paid = round(interest_paid + split['interest_amount'], 2)
+
+    outstanding = round(max(0, effective_principal - principal_paid), 2)
+    return {
+        'principal_paid': principal_paid,
+        'interest_paid': interest_paid,
+        'total_paid': round(principal_paid + interest_paid, 2),
+        'outstanding_balance': outstanding
+    }
+
+def normalize_loan(record: Dict[str, Any], customer_lookup: Optional[Dict[str, Dict[str, Any]]] = None, payment_rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    customer_id = str(first_present(record, ['customer_id', 'CustomerID', 'BorrowerID', 'BorrowerId'], '') or '')
+    customer_name = customer_lookup.get(customer_id, {}).get('name', '') if customer_lookup else ''
+    principal_amount = get_raw_principal_amount(record)
+    add_on_principal = get_add_on_principal_amount(record)
+    effective_principal_amount = get_effective_principal_amount(record)
+    pre_deducted_interest = round(to_float(first_present(record, ['pre_deducted_interest', 'PreDeductedInterest'])), 2)
+    transaction_type = get_loan_type(record)
+    debt_interest_mode = resolve_debt_interest_mode(record)
+
+    # BUSINESS RULE: KULU never deducts interest at source; only DEBT can use upfront deduction.
+    if transaction_type != 'DEBT':
+        debt_interest_mode = 'subsequent_collection'
+        pre_deducted_interest = 0.0
+
+    net_disbursed_amount = to_float(first_present(record, ['net_disbursed_amount', 'NetDisbursedAmount']), 0)
+    if net_disbursed_amount <= 0:
+        if transaction_type == 'DEBT' and debt_interest_mode == 'upfront_deduction':
+            net_disbursed_amount = max(0, principal_amount - pre_deducted_interest)
+        else:
+            net_disbursed_amount = principal_amount
+
+    balances = calculate_loan_balances({'principal_amount': principal_amount, 'effective_principal_amount': effective_principal_amount}, payment_rows or [])
+    start_date = first_present(record, ['start_date', 'StartDate', 'LoanDate', 'Date'])
+    start_date_value = parse_date_value(start_date)
+    days_active = (datetime.now().date() - start_date_value).days if start_date_value else 0
+    months_active = max(0, to_int(days_active / 30))
+    accrued_interest = calculate_interest_accrued(principal_amount, to_float(first_present(record, ['interest_rate', 'InterestRate', 'Rate'])), start_date_value) if start_date_value else 0.0
+    interest_paid_total = round(balances['interest_paid'] + (pre_deducted_interest if debt_interest_mode == 'upfront_deduction' else 0), 2)
+
+    return {
+        'loan_id': str(first_present(record, ['loan_id', 'LoanID', 'LoanId'], '') or ''),
+        'customer_id': customer_id,
+        'customer_name': customer_name or customer_id,
+        'principal_amount': principal_amount,
+        'add_on_principal': add_on_principal,
+        'effective_principal_amount': effective_principal_amount,
+        'interest_rate': round(to_float(first_present(record, ['interest_rate', 'InterestRate', 'Rate'])), 6),
+        'loan_type': str(first_present(record, ['loan_type', 'LoanType'], 'PERSONAL') or 'PERSONAL'),
+        'transaction_type': transaction_type,
+        'debt_interest_mode': debt_interest_mode,
+        'pre_deducted_interest': pre_deducted_interest,
+        'net_disbursed_amount': round(net_disbursed_amount, 2),
+        'start_date': format_display_date(start_date),
+        'start_date_iso': format_iso_date(start_date),
+        'tenure_months': to_int(first_present(record, ['tenure_months', 'TenureMonths']), 0) or None,
+        'status': title_case_status(first_present(record, ['status', 'Status', 'LoanStatus'], 'ACTIVE')),
+        'fund_source': str(first_present(record, ['fund_source', 'FundSourceID'], '') or ''),
+        'notes': str(first_present(record, ['notes', 'Notes'], '') or ''),
+        'created_date': format_display_date(first_present(record, ['created_date', 'CreatedOn'])),
+        'created_date_iso': format_iso_date(first_present(record, ['created_date', 'CreatedOn'])),
+        'closed_date': format_display_date(first_present(record, ['closed_date', 'ClosedDate'])),
+        'closed_date_iso': format_iso_date(first_present(record, ['closed_date', 'ClosedDate'])),
+        'principal_paid': balances['principal_paid'],
+        'interest_paid': interest_paid_total,
+        'total_paid': round(balances['principal_paid'] + interest_paid_total, 2),
+        'outstanding_balance': balances['outstanding_balance'],
+        'months_active': months_active,
+        'days_active': days_active,
+        'total_interest_accrued': round(accrued_interest, 2),
+        'original_interest_amount': round(to_float(first_present(record, ['original_interest_amount', 'OriginalInterestAmount']), accrued_interest), 2),
+        'waived_interest_amount': round(to_float(first_present(record, ['waived_interest_amount', 'WaivedInterestAmount'])), 2),
+        'waiver_reason': str(first_present(record, ['waiver_reason', 'WaiverReason'], '') or ''),
+        'waiver_date': format_display_date(first_present(record, ['waiver_date', 'WaiverDate'])),
+        'waiver_date_iso': format_iso_date(first_present(record, ['waiver_date', 'WaiverDate'])),
+        'effective_interest_due': round(max(0, accrued_interest - interest_paid_total - to_float(first_present(record, ['waived_interest_amount', 'WaivedInterestAmount']))), 2)
+    }
+
+def load_normalized_customers(status: Optional[str] = None, search: Optional[str] = None) -> List[Dict[str, Any]]:
+    customers = [normalize_customer(record) for record in db.get_all_rows('Customers')]
+    if status:
+        customers = [customer for customer in customers if customer['status'].upper() == status.upper()]
+    if search:
+        search_lower = search.lower()
+        customers = [
+            customer for customer in customers
+            if search_lower in customer['customer_id'].lower()
+            or search_lower in customer['name'].lower()
+            or search_lower in customer['phone'].lower()
+        ]
+    return sorted(customers, key=lambda customer: (customer['name'] or '').lower())
+
+def load_normalized_payments(loan_id: Optional[str] = None, customer_id: Optional[str] = None, payment_method: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    customers = build_customer_lookup()
+    loans = build_loan_lookup(customer_lookup=customers)
+    payments = [normalize_payment(record, customer_lookup=customers, loan_lookup=loans) for record in db.get_all_rows('Payments')]
+
+    if loan_id:
+        payments = [payment for payment in payments if payment['loan_id'] == loan_id]
+    if customer_id:
+        payments = [payment for payment in payments if payment['customer_id'] == customer_id]
+    if payment_method and payment_method.upper() != 'ALL':
+        payments = [payment for payment in payments if payment['payment_method'].upper() == payment_method.upper()]
+
+    start = parse_date_value(start_date)
+    end = parse_date_value(end_date)
+    if start or end:
+        filtered = []
+        for payment in payments:
+            payment_date = parse_date_value(payment['payment_date_iso'])
+            if not payment_date:
+                continue
+            if start and payment_date < start:
+                continue
+            if end and payment_date > end:
+                continue
+            filtered.append(payment)
+        payments = filtered
+
+    payments.sort(key=lambda payment: payment['payment_date_iso'] or '', reverse=True)
+    return payments
+
+def load_normalized_loans(customer_id: Optional[str] = None, status: Optional[str] = None, loan_type: Optional[str] = None, disbursed_from: Optional[str] = None, disbursed_to: Optional[str] = None) -> List[Dict[str, Any]]:
+    customers = build_customer_lookup()
+    payments = load_normalized_payments()
+    payments_by_loan: Dict[str, List[Dict[str, Any]]] = {}
+    for payment in payments:
+        payments_by_loan.setdefault(payment['loan_id'], []).append(payment)
+
+    normalized_loans = [
+        normalize_loan(record, customer_lookup=customers, payment_rows=payments_by_loan.get(str(first_present(record, ['loan_id', 'LoanID', 'LoanId'], '') or ''), []))
+        for record in db.get_all_rows('Loans')
+    ]
+
+    if customer_id:
+        normalized_loans = [loan for loan in normalized_loans if loan['customer_id'] == customer_id]
+    if status and status.upper() != 'ALL':
+        normalized_loans = [loan for loan in normalized_loans if loan['status'].upper() == status.upper()]
+    if loan_type and loan_type.upper() != 'ALL':
+        normalized_loans = [loan for loan in normalized_loans if loan['transaction_type'].upper() == loan_type.upper()]
+
+    from_date = parse_date_value(disbursed_from)
+    to_date = parse_date_value(disbursed_to)
+    if from_date or to_date:
+        filtered_loans = []
+        for loan in normalized_loans:
+            start = parse_date_value(loan['start_date_iso'])
+            if not start:
+                continue
+            if from_date and start < from_date:
+                continue
+            if to_date and start > to_date:
+                continue
+            filtered_loans.append(loan)
+        normalized_loans = filtered_loans
+
+    normalized_loans.sort(key=lambda loan: loan['start_date_iso'] or '', reverse=True)
+    return normalized_loans
+
 # Debug endpoint to inspect actual Excel structure
 @app.get("/debug/excel-structure")
 async def debug_excel_structure():
     """Debug endpoint to see actual column names and sample data from Excel"""
+    ensure_debug_access()
     loans = db.get_all_rows('Loans')
     payments = db.get_all_rows('Payments')
     customers = db.get_all_rows('Customers')
@@ -881,6 +1578,7 @@ async def validate_data_integrity():
     Comprehensive data validation endpoint.
     Checks for orphan records, missing mappings, and data integrity issues.
     """
+    ensure_debug_access()
     loans = db.get_all_rows('Loans')
     payments = db.get_all_rows('Payments')
     customers = db.get_all_rows('Customers')
@@ -982,105 +1680,52 @@ async def validate_data_integrity():
 
 def get_loan_summary_data(loan_id: str) -> Optional[LoanSummary]:
     """Get comprehensive loan summary with calculations"""
-    
-    # Get loan details
-    loans = db.get_all_rows('Loans')
-    loan = next((l for l in loans if l['loan_id'] == loan_id), None)
-    
+    payments = load_normalized_payments(loan_id=loan_id)
+    loans = load_normalized_loans()
+    loan = next((item for item in loans if item['loan_id'] == loan_id), None)
+
     if not loan:
         return None
-    
-    # Get customer name
-    customers = db.get_all_rows('Customers')
-    customer = next((c for c in customers if c['customer_id'] == loan['customer_id']), None)
-    customer_name = customer['name'] if customer else 'Unknown'
-    
-    # Get all payments for this loan
-    payments = db.get_all_rows('Payments')
-    loan_payments = [p for p in payments if p['loan_id'] == loan_id]
-    
-    # Calculate totals
-    principal_paid = sum(float(p.get('amount', 0)) for p in loan_payments if p.get('payment_type') in ['PRINCIPAL', 'BOTH'])
-    interest_paid = sum(float(p.get('amount', 0)) for p in loan_payments if p.get('payment_type') in ['INTEREST', 'BOTH'])
-    total_paid = principal_paid + interest_paid
-    
-    # Calculate outstanding
-    principal_amount = float(loan.get('principal_amount', 0))
-    outstanding_balance = max(0, principal_amount - principal_paid)
-    
-    # Calculate accrued interest
-    start_date = loan.get('start_date')
-    if isinstance(start_date, str):
-        start_date = datetime.strptime(start_date[:10], '%Y-%m-%d').date()
-    elif isinstance(start_date, datetime):
-        start_date = start_date.date()
-    
-    days_active = (datetime.now().date() - start_date).days
-    
-    total_interest_accrued = calculate_interest_accrued(
-        principal_amount,
-        float(loan.get('interest_rate', 0)),
-        start_date
-    )
-    
-    # Get waiver info
-    original_interest = float(loan.get('original_interest_amount', 0)) or total_interest_accrued
-    waived_interest = float(loan.get('waived_interest_amount', 0) or 0)
-    effective_interest_due = max(0, total_interest_accrued - waived_interest - interest_paid)
-    
+
     return LoanSummary(
-        loan_id=loan_id,
-        customer_name=customer_name,
-        principal_amount=principal_amount,
-        total_paid=total_paid,
-        principal_paid=principal_paid,
-        interest_paid=interest_paid,
-        outstanding_balance=outstanding_balance,
-        interest_rate=float(loan.get('interest_rate', 0)),
-        transaction_type=loan.get('transaction_type', 'OTHER'),
-        status=loan.get('status', 'ACTIVE'),
-        start_date=start_date,
-        days_active=days_active,
-        total_interest_accrued=total_interest_accrued,
-        original_interest_amount=original_interest,
-        waived_interest_amount=waived_interest,
-        effective_interest_due=effective_interest_due
+        loan_id=loan['loan_id'],
+        customer_name=loan['customer_name'],
+        principal_amount=loan['principal_amount'],
+        add_on_principal=loan.get('add_on_principal', 0.0),
+        effective_principal_amount=loan.get('effective_principal_amount', loan['principal_amount']),
+        net_disbursed_amount=loan['net_disbursed_amount'],
+        pre_deducted_interest=loan['pre_deducted_interest'],
+        total_paid=loan['total_paid'],
+        principal_paid=loan['principal_paid'],
+        interest_paid=loan['interest_paid'],
+        outstanding_balance=loan['outstanding_balance'],
+        interest_rate=loan['interest_rate'],
+        transaction_type=loan['transaction_type'],
+        debt_interest_mode=loan['debt_interest_mode'],
+        status=loan['status'],
+        start_date=loan['start_date'],
+        start_date_iso=loan['start_date_iso'],
+        months_active=loan['months_active'],
+        days_active=loan['days_active'],
+        total_interest_accrued=loan['total_interest_accrued'],
+        original_interest_amount=loan['original_interest_amount'],
+        waived_interest_amount=loan['waived_interest_amount'],
+        effective_interest_due=loan['effective_interest_due']
     )
 
 # ==================== API ENDPOINTS ====================
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Diamond Fincorp Loan Management API",
-        "version": "2.0.0",
-        "status": "active",
-        "features": ["transaction_types", "interest_waivers", "capital_tracking", "audit_logs"]
-    }
 
 # ========== CUSTOMER ENDPOINTS ==========
 
 @app.get("/customers", response_model=List[Dict])
 async def get_customers(status: Optional[str] = None, search: Optional[str] = None):
     """Get all customers with optional filtering"""
-    customers = db.get_all_rows('Customers')
-    
-    if status:
-        customers = [c for c in customers if str(c.get('status', '')).upper() == status.upper()]
-    
-    if search:
-        search_lower = search.lower()
-        customers = [c for c in customers if 
-                    search_lower in str(c.get('name', '')).lower() or 
-                    search_lower in str(c.get('phone', '')).lower() or
-                    search_lower in str(c.get('customer_id', '')).lower()]
-    
-    return customers
+    return load_normalized_customers(status=status, search=search)
 
 @app.get("/customers/{customer_id}")
 async def get_customer(customer_id: str):
     """Get single customer by ID"""
-    customers = db.get_all_rows('Customers')
+    customers = load_normalized_customers()
     customer = next((c for c in customers if c['customer_id'] == customer_id), None)
     
     if not customer:
@@ -1088,26 +1733,88 @@ async def get_customer(customer_id: str):
     
     return customer
 
+@app.get("/customers/{customer_id}/profile")
+async def get_customer_profile(customer_id: str):
+    """Get a customer-centric view with profile, loans, transactions, and current totals."""
+    customer = await get_customer(customer_id)
+    loans = load_normalized_loans(customer_id=customer_id)
+    payments = load_normalized_payments(customer_id=customer_id)
+    help_records = [record for record in (normalize_help(row) for row in db.get_all_rows('Help')) if record['customer_id'] == customer_id]
+
+    totals = {
+        'total_disbursed': round(sum(to_float(loan.get('effective_principal_amount', loan.get('principal_amount'))) for loan in loans), 2),
+        'total_collected': round(sum(to_float(loan.get('principal_paid')) for loan in loans), 2),
+        'interest_collected': round(sum(to_float(loan.get('interest_paid')) for loan in loans), 2),
+        'outstanding_balance': round(sum(to_float(loan.get('outstanding_balance')) for loan in loans), 2),
+        'active_loans': len([loan for loan in loans if str(loan.get('status', '')).upper() == 'ACTIVE'])
+    }
+
+    transactions = sorted(
+        [
+            {
+                'transaction_id': payment['payment_id'],
+                'transaction_type': 'Payment',
+                'date': payment['payment_date'],
+                'date_iso': payment['payment_date_iso'],
+                'amount': payment['total_amount'],
+                'principal_amount': payment['principal_amount'],
+                'interest_amount': payment['interest_amount'],
+                'status': payment['payment_method'],
+                'notes': payment['notes']
+            }
+            for payment in payments
+        ] + [
+            {
+                'transaction_id': help_record['help_id'],
+                'transaction_type': 'Help',
+                'date': help_record['help_date'],
+                'date_iso': help_record['help_date_iso'],
+                'amount': help_record['help_amount'],
+                'principal_amount': 0.0,
+                'interest_amount': 0.0,
+                'status': help_record['status'],
+                'notes': help_record['help_note']
+            }
+            for help_record in help_records
+        ],
+        key=lambda row: (row.get('date_iso') or '', row.get('transaction_id') or ''),
+        reverse=True
+    )
+
+    return {
+        'customer': customer,
+        'totals': totals,
+        'loans': loans,
+        'payments': payments,
+        'help_records': help_records,
+        'transactions': transactions
+    }
+
 @app.post("/customers")
 async def create_customer(customer: Customer):
     """Create new customer"""
     customer_id = db.get_next_id('customer')
-    
-    data = [
-        customer_id,
-        customer.name,
-        customer.phone,
-        customer.email or '',
-        customer.address or '',
-        customer.id_proof_type or '',
-        customer.id_proof_number or '',
-        customer.status,
-        datetime.now(),
-        customer.notes or ''
-    ]
-    
-    db.add_row('Customers', data)
-    db.log_audit('CUSTOMER', customer_id, 'CREATE', None, {'name': customer.name, 'phone': customer.phone})
+    phone = validate_phone_number(customer.phone)
+    payload = {
+        'customer_id': customer_id,
+        'name': customer.name,
+        'phone': phone,
+        'email': customer.email or '',
+        'address': customer.address or '',
+        'id_proof_type': customer.id_proof_type or '',
+        'id_proof_number': customer.id_proof_number or '',
+        'status': customer.status,
+        'created_date': datetime.now(),
+        'notes': customer.notes or '',
+        'BorrowerID': customer_id,
+        'BorrowerName': customer.name,
+        'Phone': phone,
+        'Address': customer.address or '',
+        'IsActive': 'Yes' if str(customer.status).upper() == 'ACTIVE' else 'No',
+        'CreatedOn': datetime.now()
+    }
+    db.add_dict_row('Customers', payload)
+    db.log_audit('CUSTOMER', customer_id, 'CREATE', None, {'name': customer.name, 'phone': phone})
     
     return {"customer_id": customer_id, "message": "Customer created successfully"}
 
@@ -1116,16 +1823,21 @@ async def update_customer(customer_id: str, customer: Customer):
     """Update existing customer"""
     # Get old values for audit
     old_customer = await get_customer(customer_id)
+    phone = validate_phone_number(customer.phone)
     
     updates = {
         'name': customer.name,
-        'phone': customer.phone,
+        'phone': phone,
         'email': customer.email or '',
         'address': customer.address or '',
         'id_proof_type': customer.id_proof_type or '',
         'id_proof_number': customer.id_proof_number or '',
         'status': customer.status,
-        'notes': customer.notes or ''
+        'notes': customer.notes or '',
+        'BorrowerName': customer.name,
+        'Phone': phone,
+        'Address': customer.address or '',
+        'IsActive': 'Yes' if str(customer.status).upper() == 'ACTIVE' else 'No'
     }
     
     db.update_row('Customers', 'customer_id', customer_id, updates)
@@ -1139,42 +1851,18 @@ async def update_customer(customer_id: str, customer: Customer):
 async def get_loans(
     customer_id: Optional[str] = None, 
     status: Optional[str] = None,
-    loan_type: Optional[str] = None
+    loan_type: Optional[str] = None,
+    disbursed_from: Optional[str] = None,
+    disbursed_to: Optional[str] = None
 ):
     """Get all loans with optional filtering, including payment totals"""
-    loans = db.get_all_rows('Loans')
-    payments = db.get_all_rows('Payments')
-    
-    if customer_id:
-        loans = [l for l in loans if l.get('customer_id') == customer_id]
-    
-    if status:
-        loans = [l for l in loans if str(l.get('status', '')).upper() == status.upper()]
-    
-    if loan_type:
-        loans = [l for l in loans if str(l.get('loan_type', '')).upper() == loan_type.upper()]
-    
-    # Calculate principal_paid and interest_paid for each loan
-    enriched_loans = []
-    for loan in loans:
-        loan_id = loan.get('loan_id')
-        loan_payments = [p for p in payments if p.get('loan_id') == loan_id]
-        
-        principal_paid = sum(
-            float(p.get('amount', 0)) for p in loan_payments 
-            if str(p.get('payment_type', '')).upper() in ['PRINCIPAL', 'BOTH']
-        )
-        interest_paid = sum(
-            float(p.get('amount', 0)) for p in loan_payments 
-            if str(p.get('payment_type', '')).upper() in ['INTEREST', 'BOTH']
-        )
-        
-        loan_copy = dict(loan)
-        loan_copy['principal_paid'] = round(principal_paid, 2)
-        loan_copy['interest_paid'] = round(interest_paid, 2)
-        enriched_loans.append(loan_copy)
-    
-    return enriched_loans
+    return load_normalized_loans(
+        customer_id=customer_id,
+        status=status,
+        loan_type=loan_type,
+        disbursed_from=disbursed_from,
+        disbursed_to=disbursed_to
+    )
 
 @app.get("/loans/{loan_id}/summary")
 async def get_loan_summary(loan_id: str):
@@ -1189,33 +1877,74 @@ async def get_loan_summary(loan_id: str):
 @app.post("/loans")
 async def create_loan(loan: Loan):
     """Create new loan"""
+    if loan.principal_amount <= 0:
+        raise HTTPException(status_code=400, detail="Principal amount must be greater than 0")
+    if loan.interest_rate < 0:
+        raise HTTPException(status_code=400, detail="Interest rate cannot be negative")
     loan_id = db.get_next_id('loan')
+    normalized_type = str(loan.transaction_type or 'KULU').strip().upper()
+    debt_interest_mode = resolve_debt_interest_mode({'debt_interest_mode': loan.debt_interest_mode})
+    add_on_principal = round(max(0, to_float(loan.add_on_principal)), 2)
+    pre_deducted_interest = round(to_float(loan.pre_deducted_interest), 2)
+
+    if add_on_principal > loan.principal_amount:
+        raise HTTPException(status_code=400, detail="Add-on principal cannot exceed principal amount")
+
+    # BUSINESS RULE: KULU loans always disburse the full principal and never deduct interest upfront.
+    if normalized_type != 'DEBT':
+        debt_interest_mode = 'subsequent_collection'
+        pre_deducted_interest = 0.0
+
+    if debt_interest_mode == 'upfront_deduction':
+        if pre_deducted_interest < 0 or pre_deducted_interest > loan.principal_amount:
+            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and principal amount")
+        net_disbursed_amount = round(loan.principal_amount - pre_deducted_interest, 2)
+    else:
+        pre_deducted_interest = 0.0
+        net_disbursed_amount = round(loan.principal_amount, 2)
     
-    data = [
-        loan_id,
-        loan.customer_id,
-        loan.principal_amount,
-        loan.interest_rate,
-        loan.loan_type,
-        loan.start_date,
-        loan.tenure_months or '',
-        loan.status,
-        loan.fund_source or '',
-        datetime.now(),
-        None,
-        loan.notes or '',
-        loan.transaction_type,  # New field
-        0,  # original_interest_amount - will be calculated
-        0,  # waived_interest_amount
-        '',  # waiver_reason
-        None  # waiver_date
-    ]
-    
-    db.add_row('Loans', data)
+    payload = {
+        'loan_id': loan_id,
+        'customer_id': loan.customer_id,
+        'principal_amount': loan.principal_amount,
+        'add_on_principal': add_on_principal,
+        'interest_rate': loan.interest_rate,
+        'loan_type': loan.loan_type,
+        'start_date': loan.start_date,
+        'tenure_months': loan.tenure_months or '',
+        'status': loan.status,
+        'fund_source': loan.fund_source or '',
+        'created_date': datetime.now(),
+        'closed_date': None,
+        'notes': loan.notes or '',
+        'transaction_type': normalized_type,
+        'debt_interest_mode': debt_interest_mode,
+        'pre_deducted_interest': pre_deducted_interest,
+        'net_disbursed_amount': net_disbursed_amount,
+        'original_interest_amount': 0,
+        'waived_interest_amount': 0,
+        'waiver_reason': '',
+        'waiver_date': None,
+        'LoanID': loan_id,
+        'BorrowerID': loan.customer_id,
+        'TYPE': normalized_type,
+        'PrincipalAmount': loan.principal_amount,
+        'AddOnPrincipal': add_on_principal,
+        'InterestRate': loan.interest_rate,
+        'StartDate': loan.start_date,
+        'FundSourceID': loan.fund_source or '',
+        'LoanStatus': loan.status,
+        'CreatedOn': datetime.now()
+    }
+    db.add_dict_row('Loans', payload)
     db.log_audit('LOAN', loan_id, 'CREATE', None, {
         'customer_id': loan.customer_id,
         'principal': loan.principal_amount,
-        'transaction_type': loan.transaction_type
+        'add_on_principal': add_on_principal,
+        'transaction_type': normalized_type,
+        'debt_interest_mode': debt_interest_mode,
+        'pre_deducted_interest': pre_deducted_interest,
+        'net_disbursed_amount': net_disbursed_amount
     })
     
     return {"loan_id": loan_id, "message": "Loan created successfully"}
@@ -1223,16 +1952,58 @@ async def create_loan(loan: Loan):
 @app.put("/loans/{loan_id}")
 async def update_loan(loan_id: str, loan: Loan):
     """Update existing loan"""
+    if loan.principal_amount <= 0:
+        raise HTTPException(status_code=400, detail="Principal amount must be greater than 0")
+    if loan.interest_rate < 0:
+        raise HTTPException(status_code=400, detail="Interest rate cannot be negative")
+    normalized_type = str(loan.transaction_type or 'KULU').strip().upper()
+    debt_interest_mode = resolve_debt_interest_mode({'debt_interest_mode': loan.debt_interest_mode})
+    add_on_principal = round(max(0, to_float(loan.add_on_principal)), 2)
+    pre_deducted_interest = round(to_float(loan.pre_deducted_interest), 2)
+
+    if add_on_principal > loan.principal_amount:
+        raise HTTPException(status_code=400, detail="Add-on principal cannot exceed principal amount")
+
+    # BUSINESS RULE: KULU loans can only use subsequent collection; DEBT optionally supports upfront deduction.
+    if normalized_type != 'DEBT':
+        debt_interest_mode = 'subsequent_collection'
+        pre_deducted_interest = 0.0
+    elif debt_interest_mode == 'upfront_deduction':
+        if pre_deducted_interest < 0 or pre_deducted_interest > loan.principal_amount:
+            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and principal amount")
+    else:
+        pre_deducted_interest = 0.0
+
+    net_disbursed_amount = round(
+        loan.principal_amount - pre_deducted_interest
+        if debt_interest_mode == 'upfront_deduction'
+        else loan.principal_amount,
+        2
+    )
+
     updates = {
+        'customer_id': loan.customer_id,
         'principal_amount': loan.principal_amount,
+        'add_on_principal': add_on_principal,
         'interest_rate': loan.interest_rate,
         'loan_type': loan.loan_type,
-        'transaction_type': loan.transaction_type,
+        'transaction_type': normalized_type,
         'start_date': loan.start_date,
         'tenure_months': loan.tenure_months or '',
         'status': loan.status,
         'fund_source': loan.fund_source or '',
-        'notes': loan.notes or ''
+        'debt_interest_mode': debt_interest_mode,
+        'pre_deducted_interest': pre_deducted_interest,
+        'net_disbursed_amount': net_disbursed_amount,
+        'notes': loan.notes or '',
+        'BorrowerID': loan.customer_id,
+        'TYPE': normalized_type,
+        'PrincipalAmount': loan.principal_amount,
+        'AddOnPrincipal': add_on_principal,
+        'InterestRate': loan.interest_rate,
+        'StartDate': loan.start_date,
+        'FundSourceID': loan.fund_source or '',
+        'LoanStatus': loan.status
     }
     
     # Get current loan status for comparison
@@ -1251,22 +2022,19 @@ async def update_loan(loan_id: str, loan: Loan):
 async def waive_interest(loan_id: str, waiver: InterestWaiver):
     """Apply interest waiver to a loan"""
     # Get current loan data
-    loans = db.get_all_rows('Loans')
-    loan = next((l for l in loans if l['loan_id'] == loan_id), None)
+    loan = next((item for item in load_normalized_loans() if item['loan_id'] == loan_id), None)
     
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
     # Calculate current interest accrued
-    start_date = loan.get('start_date')
-    if isinstance(start_date, str):
-        start_date = datetime.strptime(start_date[:10], '%Y-%m-%d').date()
-    elif isinstance(start_date, datetime):
-        start_date = start_date.date()
+    start_date = parse_date_value(loan.get('start_date_iso') or loan.get('start_date'))
+    if not start_date:
+        raise HTTPException(status_code=400, detail="Loan start date is invalid")
     
     current_interest = calculate_interest_accrued(
-        float(loan.get('principal_amount', 0)),
-        float(loan.get('interest_rate', 0)),
+        float(loan.get('principal_amount', 0) or 0),
+        float(loan.get('interest_rate', 0) or 0),
         start_date
     )
     
@@ -1319,48 +2087,220 @@ async def get_waiver_history(loan_id: str):
 # ========== PAYMENT ENDPOINTS ==========
 
 @app.get("/payments")
-async def get_payments(loan_id: Optional[str] = None, customer_id: Optional[str] = None):
+async def get_payments(
+    loan_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
     """Get all payments with optional filtering"""
-    payments = db.get_all_rows('Payments')
-    
-    if loan_id:
-        payments = [p for p in payments if p.get('loan_id') == loan_id]
-    
-    if customer_id:
-        payments = [p for p in payments if p.get('customer_id') == customer_id]
-    
-    # Sort by payment_date descending
-    payments.sort(key=lambda x: x.get('payment_date') or datetime.min, reverse=True)
-    
-    return payments
+    return load_normalized_payments(
+        loan_id=loan_id,
+        customer_id=customer_id,
+        payment_method=payment_method,
+        start_date=start_date,
+        end_date=end_date
+    )
 
 @app.post("/payments")
 async def create_payment(payment: Payment):
     """Record new payment"""
+    loan = next((item for item in load_normalized_loans() if item['loan_id'] == payment.loan_id), None)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if payment.customer_id != loan.get('customer_id'):
+        raise HTTPException(status_code=400, detail="Payment customer does not match the loan customer")
+
     payment_id = db.get_next_id('payment')
+    principal_amount = round(to_float(payment.principal_amount), 2)
+    interest_amount = round(to_float(payment.interest_amount), 2)
+    total_amount = round(to_float(payment.total_amount if payment.total_amount is not None else payment.amount), 2)
+
+    if total_amount <= 0 and (principal_amount > 0 or interest_amount > 0):
+        total_amount = round(principal_amount + interest_amount, 2)
+
+    if principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
+        interest_amount = total_amount
+
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="At least one of principal or interest amount must be greater than 0")
+
+    if principal_amount < 0 or interest_amount < 0:
+        raise HTTPException(status_code=400, detail="Principal and interest amounts cannot be negative")
+
+    if round(principal_amount + interest_amount, 2) != round(total_amount, 2):
+        raise HTTPException(status_code=400, detail="TotalAmount must equal PrincipalAmount + InterestAmount")
+
+    if principal_amount > round(to_float(loan.get('outstanding_balance')), 2):
+        raise HTTPException(status_code=400, detail="Principal amount cannot exceed the current outstanding balance")
+
+    if principal_amount > 0 and interest_amount > 0:
+        payment_type = 'BOTH'
+    elif principal_amount > 0:
+        payment_type = 'PRINCIPAL'
+    else:
+        payment_type = 'INTEREST'
+
+    help_category = str(payment.help_category or 'None').title()
+    if help_category != 'None' and help_category not in HELP_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid help category")
     
-    data = [
-        payment_id,
-        payment.loan_id,
-        payment.customer_id,
-        payment.payment_date,
-        payment.amount,
-        payment.payment_type,
-        payment.payment_method,
-        payment.reference_number or '',
-        datetime.now(),
-        payment.created_by,
-        payment.notes or ''
-    ]
-    
-    db.add_row('Payments', data)
+    payload = {
+        'payment_id': payment_id,
+        'loan_id': payment.loan_id,
+        'customer_id': payment.customer_id,
+        'payment_date': payment.payment_date,
+        'amount': total_amount,
+        'payment_type': payment_type,
+        'payment_method': payment.payment_method,
+        'reference_number': payment.reference_number or '',
+        'created_date': datetime.now(),
+        'created_by': payment.created_by,
+        'notes': payment.notes or '',
+        'principal_amount': principal_amount,
+        'interest_amount': interest_amount,
+        'help_category': help_category,
+        'PaymentID': payment_id,
+        'LoanID': payment.loan_id,
+        'Borrower': payment.customer_id,
+        'PaymentDate': payment.payment_date,
+        'PaymentAmount': total_amount,
+        'PaymentType': payment_type,
+        'Remarks': payment.notes or '',
+        'CreatedOn': datetime.now()
+    }
+    db.add_dict_row('Payments', payload)
     db.log_audit('PAYMENT', payment_id, 'CREATE', None, {
         'loan_id': payment.loan_id,
-        'amount': payment.amount,
-        'type': payment.payment_type
+        'amount': total_amount,
+        'principal_amount': principal_amount,
+        'interest_amount': interest_amount,
+        'type': payment_type,
+        'help_category': help_category
     })
+
+    help_id = None
+    if help_category != 'None':
+        customer = next((item for item in load_normalized_customers() if item['customer_id'] == payment.customer_id), None)
+        help_id = db.get_next_id('help')
+        help_status = title_case_status(payment.help_status, 'Active')
+        if help_status not in HELP_STATUSES:
+            help_status = 'Active'
+
+        db.add_dict_row('Help', {
+            'help_id': help_id,
+            'customer_id': payment.customer_id,
+            'customer_name': customer['name'] if customer else payment.customer_id,
+            'help_date': payment.payment_date,
+            'help_amount': total_amount,
+            'help_category': help_category,
+            'help_note': payment.help_note or payment.notes or '',
+            'repayment_date': payment.repayment_date or '',
+            'repayment_amount': to_optional_money(payment.repayment_amount),
+            'status': help_status,
+            'HelpID': help_id,
+            'CustomerID': payment.customer_id,
+            'CustomerName': customer['name'] if customer else payment.customer_id,
+            'HelpDate': payment.payment_date,
+            'HelpAmount': total_amount,
+            'HelpCategory': help_category,
+            'HelpNote': payment.help_note or payment.notes or '',
+            'RepaymentDate': payment.repayment_date or '',
+            'RepaymentAmount': to_optional_money(payment.repayment_amount),
+            'Status': help_status
+        })
+        db.log_audit('HELP', help_id, 'CREATE', None, {
+            'customer_id': payment.customer_id,
+            'help_amount': total_amount,
+            'help_category': help_category,
+            'status': help_status
+        })
     
-    return {"payment_id": payment_id, "message": "Payment recorded successfully"}
+    return {"payment_id": payment_id, "help_id": help_id, "message": "Payment recorded successfully"}
+
+@app.get("/api/help")
+async def get_help_records(customer_id: Optional[str] = None, status: Optional[str] = None):
+    records = [normalize_help(record) for record in db.get_all_rows('Help')]
+    if customer_id:
+        records = [record for record in records if record['customer_id'] == customer_id]
+    if status:
+        records = [record for record in records if record['status'].upper() == status.upper()]
+    records.sort(key=lambda record: record['help_date_iso'] or '', reverse=True)
+    return records
+
+@app.post("/api/help")
+async def create_help_record(help_record: HelpRecord):
+    if help_record.help_category not in HELP_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid help category")
+    help_id = db.get_next_id('help')
+    status = title_case_status(help_record.status, 'Active')
+    if status not in HELP_STATUSES:
+        status = 'Active'
+    db.add_dict_row('Help', {
+        'help_id': help_id,
+        'customer_id': help_record.customer_id,
+        'customer_name': help_record.customer_name,
+        'help_date': help_record.help_date,
+        'help_amount': round(to_float(help_record.help_amount), 2),
+        'help_category': help_record.help_category,
+        'help_note': help_record.help_note or '',
+        'repayment_date': help_record.repayment_date or '',
+        'repayment_amount': to_optional_money(help_record.repayment_amount),
+        'status': status,
+        'HelpID': help_id,
+        'CustomerID': help_record.customer_id,
+        'CustomerName': help_record.customer_name,
+        'HelpDate': help_record.help_date,
+        'HelpAmount': round(to_float(help_record.help_amount), 2),
+        'HelpCategory': help_record.help_category,
+        'HelpNote': help_record.help_note or '',
+        'RepaymentDate': help_record.repayment_date or '',
+        'RepaymentAmount': to_optional_money(help_record.repayment_amount),
+        'Status': status
+    })
+    db.log_audit('HELP', help_id, 'CREATE', None, {'customer_id': help_record.customer_id, 'help_amount': help_record.help_amount})
+    return {"help_id": help_id, "message": "Help record created successfully"}
+
+@app.put("/api/help/{help_id}")
+async def update_help_record(help_id: str, help_record: HelpRecord):
+    normalized_status = title_case_status(help_record.status, 'Active')
+    updates = {
+        'help_id': help_id,
+        'customer_id': help_record.customer_id,
+        'customer_name': help_record.customer_name,
+        'help_date': help_record.help_date,
+        'help_amount': round(to_float(help_record.help_amount), 2),
+        'help_category': help_record.help_category,
+        'help_note': help_record.help_note or '',
+        'repayment_date': help_record.repayment_date or '',
+        'repayment_amount': to_optional_money(help_record.repayment_amount),
+        'status': normalized_status,
+        'CustomerID': help_record.customer_id,
+        'CustomerName': help_record.customer_name,
+        'HelpDate': help_record.help_date,
+        'HelpAmount': round(to_float(help_record.help_amount), 2),
+        'HelpCategory': help_record.help_category,
+        'HelpNote': help_record.help_note or '',
+        'RepaymentDate': help_record.repayment_date or '',
+        'RepaymentAmount': to_optional_money(help_record.repayment_amount),
+        'Status': normalized_status
+    }
+    if isinstance(db, PostgresDB):
+        db.update_row('Help', 'help_id', help_id, {key: value for key, value in updates.items() if key == key.lower()})
+    else:
+        db.update_row('Help', 'HelpID', help_id, updates)
+    db.log_audit('HELP', help_id, 'UPDATE', None, updates)
+    return {"message": "Help record updated successfully"}
+
+@app.delete("/api/help/{help_id}")
+async def delete_help_record(help_id: str):
+    if isinstance(db, PostgresDB):
+        db.delete_row('Help', 'help_id', help_id)
+    else:
+        db.delete_row('Help', 'HelpID', help_id)
+    db.log_audit('HELP', help_id, 'DELETE', None, None)
+    return {"message": "Help record deleted successfully"}
 
 # ========== CAPITAL INJECTION ENDPOINTS ==========
 
@@ -1373,6 +2313,8 @@ async def get_capital_injections():
 @app.post("/capital-injections")
 async def create_capital_injection(injection: CapitalInjection):
     """Record new capital injection"""
+    if injection.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
     injection_id = db.get_next_id('injection')
     
     data = [
@@ -1397,21 +2339,14 @@ async def create_capital_injection(injection: CapitalInjection):
 async def get_capital_summary():
     """Get capital utilization summary"""
     injections = db.get_all_rows('CapitalInjections')
-    loans = db.get_all_rows('Loans')
-    payments = db.get_all_rows('Payments')
+    loans = load_normalized_loans()
     
     # Total injected
     total_injected = sum(float(inj.get('amount', 0)) for inj in injections)
     
-    # Total principal disbursed
-    total_disbursed = sum(float(loan.get('principal_amount', 0)) for loan in loans)
-    
-    # Principal collected back
-    principal_collected = sum(
-        float(p.get('amount', 0)) 
-        for p in payments 
-        if p.get('payment_type') in ['PRINCIPAL', 'BOTH']
-    )
+    # BUSINESS RULE: capital reporting excludes add_on_principal from disbursed and collected totals.
+    total_disbursed = sum(float(loan.get('effective_principal_amount', loan.get('principal_amount', 0)) or 0) for loan in loans)
+    principal_collected = sum(float(loan.get('principal_paid', 0) or 0) for loan in loans)
     
     # Available = Injected - (Disbursed - Collected)
     capital_in_use = total_disbursed - principal_collected
@@ -1464,122 +2399,26 @@ async def get_audit_log(
 @app.get("/dashboard/stats", response_model=DashboardStats)
 async def get_dashboard_stats():
     """Get comprehensive dashboard statistics with flexible column access"""
-    from collections import defaultdict
-    
-    customers = db.get_all_rows('Customers')  # Maps to Borrower_Master
-    loans = db.get_all_rows('Loans')  # Maps to Loan_Master
-    payments = db.get_all_rows('Payments')  # Maps to Payment_Transactions
+    customers = load_normalized_customers()
+    loans = load_normalized_loans()
     injections = db.get_all_rows('CapitalInjections')
-    
-    # Helper functions for flexible column access
-    def get_loan_id(record):
-        for key in ['LoanID', 'loan_id', 'Loan_ID', 'loanid', 'LoanId']:
-            if key in record and record[key] is not None:
-                return str(record[key])
-        return None
-    
-    def get_principal(loan):
-        for key in ['principal_amount', 'Principal', 'PrincipalAmount', 'Amount', 'LoanAmount']:
-            if key in loan and loan[key] is not None:
-                try:
-                    return float(loan[key])
-                except:
-                    continue
-        return 0
-    
-    def get_payment_amount(payment):
-        for key in ['amount', 'Amount', 'PaymentAmount', 'TransactionAmount']:
-            if key in payment and payment[key] is not None:
-                try:
-                    return float(payment[key])
-                except:
-                    continue
-        return 0
-    
-    def get_payment_type(payment):
-        for key in ['payment_type', 'PaymentType', 'Type', 'TransactionType']:
-            if key in payment and payment[key] is not None:
-                return str(payment[key]).strip().upper()
-        return 'UNKNOWN'
-    
-    def get_status(record, default='ACTIVE'):
-        for key in ['status', 'Status', 'LoanStatus']:
-            if key in record and record[key] is not None:
-                return str(record[key]).strip().upper()
-        return default
-    
+
     total_customers = len(customers)
-    active_customers = len([c for c in customers if get_status(c) == 'ACTIVE'])
-    
+    active_customers = len([c for c in customers if str(c.get('status', '')).upper() == 'ACTIVE'])
     total_loans = len(loans)
-    active_loans = len([l for l in loans if get_status(l) == 'ACTIVE'])
-    
-    # Transaction type counts (using get_loan_type helper)
-    kulu_count = len([l for l in loans if get_loan_type(l) == 'KULU'])
-    debt_count = len([l for l in loans if get_loan_type(l) == 'DEBT'])
-    other_count = len([l for l in loans if get_loan_type(l) == 'OTHER'])
-    
-    total_principal_disbursed = sum(get_principal(l) for l in loans)
-    
-    # Build loan principal map for proper payment type handling
-    loan_principal_map = {get_loan_id(l): get_principal(l) for l in loans}
-    loan_principal_collected = defaultdict(float)
-    
-    # Calculate collected amounts with proper payment type handling
-    principal_collected = 0
-    interest_collected = 0
-    
-    for payment in payments:
-        amount = get_payment_amount(payment)
-        ptype = get_payment_type(payment)
-        loan_id = get_loan_id(payment)
-        loan_principal = loan_principal_map.get(loan_id, 0)
-        
-        if 'PRINCIPAL' in ptype and 'INTEREST' in ptype:
-            # Combined payment
-            remaining = loan_principal - loan_principal_collected[loan_id]
-            if amount <= remaining:
-                principal_collected += amount
-                loan_principal_collected[loan_id] += amount
-            else:
-                principal_collected += remaining
-                interest_collected += (amount - remaining)
-                loan_principal_collected[loan_id] += remaining
-        elif 'PRINCIPAL' in ptype:
-            principal_collected += amount
-            loan_principal_collected[loan_id] += amount
-        elif 'INTEREST' in ptype:
-            interest_collected += amount
-        else:
-            # Unknown type - treat as combined
-            remaining = loan_principal - loan_principal_collected[loan_id]
-            if amount <= remaining:
-                principal_collected += amount
-                loan_principal_collected[loan_id] += amount
-            else:
-                principal_collected += remaining
-                interest_collected += (amount - remaining)
-                loan_principal_collected[loan_id] += remaining
-                
-    # CORRECT CALCULATION: Sum usage of max(0, principal - collected) for EACH loan
-    # This prevents "over-collected" loans (negative outstanding) from reducing the total outstanding
-    principal_outstanding = 0
-    for l in loans:
-        lid = get_loan_id(l)
-        p_amount = get_principal(l)
-        collected = loan_principal_collected.get(lid, 0)
-        principal_outstanding += max(0, p_amount - collected)
+    active_loans = len([l for l in loans if str(l.get('status', '')).upper() == 'ACTIVE'])
+    kulu_count = len([l for l in loans if l.get('transaction_type') == 'KULU'])
+    debt_count = len([l for l in loans if l.get('transaction_type') == 'DEBT'])
+    other_count = len([l for l in loans if l.get('transaction_type') not in {'KULU', 'DEBT'}])
+    total_principal_disbursed = sum(to_float(l.get('effective_principal_amount', l.get('principal_amount'))) for l in loans)
+    principal_collected = sum(to_float(l.get('principal_paid')) for l in loans)
+    interest_collected = sum(to_float(l.get('interest_paid')) for l in loans)
+    principal_outstanding = sum(to_float(l.get('outstanding_balance')) for l in loans)
 
     # Total interest waived (try different column names)
     total_interest_waived = 0
     for l in loans:
-        for key in ['waived_interest_amount', 'WaivedInterest', 'InterestWaived']:
-            if key in l and l[key] is not None:
-                try:
-                    total_interest_waived += float(l[key])
-                    break
-                except:
-                    continue
+        total_interest_waived += to_float(l.get('waived_interest_amount'))
     
     # Net profit (interest collected is profit)
     net_profit = interest_collected
@@ -1622,35 +2461,28 @@ async def get_dashboard_stats():
 @app.get("/dashboard/loan-trends")
 async def get_loan_trends():
     """Get loan disbursement and collection trends"""
-    loans = db.get_all_rows('Loans')
-    payments = db.get_all_rows('Payments')
-    
-    # Group by month
     from collections import defaultdict
+
+    loans = load_normalized_loans()
+    payments = load_normalized_payments()
     monthly_data = defaultdict(lambda: {'disbursed': 0, 'principal_collected': 0, 'interest_collected': 0})
-    
+
     for loan in loans:
-        start_date = loan.get('start_date')
-        if start_date:
-            if isinstance(start_date, datetime):
-                month_key = start_date.strftime('%Y-%m')
-            else:
-                month_key = str(start_date)[:7]
-            monthly_data[month_key]['disbursed'] += float(loan.get('principal_amount', 0))
-    
-    for payment in payments:
-        payment_date = payment.get('payment_date')
-        if payment_date:
-            if isinstance(payment_date, datetime):
-                month_key = payment_date.strftime('%Y-%m')
-            else:
-                month_key = str(payment_date)[:7]
-            if payment.get('payment_type') in ['PRINCIPAL', 'BOTH']:
-                monthly_data[month_key]['principal_collected'] += float(payment.get('amount', 0))
-            if payment.get('payment_type') in ['INTEREST', 'BOTH']:
-                monthly_data[month_key]['interest_collected'] += float(payment.get('amount', 0))
-    
-    # Convert to list and sort
+        month_key = str(loan.get('start_date_iso') or '')[:7]
+        if month_key:
+            monthly_data[month_key]['disbursed'] += to_float(loan.get('effective_principal_amount', loan.get('principal_amount')))
+
+    remaining_by_loan = {loan['loan_id']: to_float(loan.get('effective_principal_amount', loan.get('principal_amount'))) for loan in loans}
+    for payment in sorted(payments, key=lambda row: ((row.get('payment_date_iso') or ''), row.get('payment_id', ''))):
+        month_key = str(payment.get('payment_date_iso') or '')[:7]
+        if not month_key:
+            continue
+        loan_id = payment.get('loan_id')
+        split = resolve_payment_components(payment, remaining_by_loan.get(loan_id, 0))
+        remaining_by_loan[loan_id] = max(0, remaining_by_loan.get(loan_id, 0) - split['principal_amount'])
+        monthly_data[month_key]['principal_collected'] += split['principal_amount']
+        monthly_data[month_key]['interest_collected'] += split['interest_amount']
+
     trends = [{'month': k, **v} for k, v in monthly_data.items()]
     trends.sort(key=lambda x: x['month'])
     
@@ -1729,16 +2561,9 @@ async def get_financial_metrics(
     def get_date(record, keys):
         for key in keys:
             if key in record and record[key] is not None:
-                val = record[key]
-                if isinstance(val, datetime):
-                    return val.date()
-                elif isinstance(val, date):
-                    return val
-                elif isinstance(val, str):
-                    try:
-                        return datetime.strptime(str(val)[:10], '%Y-%m-%d').date()
-                    except:
-                        continue
+                parsed = parse_date_value(record[key])
+                if parsed:
+                    return parsed
         return None
 
     def get_loan_type(record):
@@ -2143,28 +2968,10 @@ async def get_trend_data(
 @app.get("/api/customers")
 async def get_customers_list():
     """Get list of customers for dropdowns"""
-    customers = db.get_all_rows('Customers')
-    # Return unique list
-    result = []
-    seen = set()
-    for c in customers:
-        cid = None
-        for key in ['customer_id', 'CustomerId', 'BorrowerId', 'id']:
-            if key in c and c[key]:
-                cid = str(c[key])
-                break
-        
-        name = None
-        for key in ['name', 'Name', 'BorrowerName', 'CustomerName']:
-            if key in c and c[key]:
-                name = str(c[key])
-                break
-        
-        if cid and cid not in seen:
-            seen.add(cid)
-            result.append({'id': cid, 'name': name or cid})
-    
-    return sorted(result, key=lambda x: x['name'] or '')
+    return [
+        {'id': customer['customer_id'], 'customer_id': customer['customer_id'], 'name': customer['name'], 'status': customer['status']}
+        for customer in load_normalized_customers()
+    ]
 
 # ========== ADVANCED REPORTS ==========
 
@@ -2258,12 +3065,12 @@ async def get_report_by_transaction_type(
     # Filter Payments by Date
     if start_date or end_date:
         filtered_payments = []
-        start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else date.min
-        end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else date.max
+        start = parse_date_value(start_date)
+        end = parse_date_value(end_date)
         
         for p in payments:
             pdate = get_date(p, ['payment_date', 'PaymentDate', 'Date', 'TransactionDate'])
-            if pdate and start <= pdate <= end:
+            if pdate and (not start or pdate >= start) and (not end or pdate <= end):
                 filtered_payments.append(p)
         payments = filtered_payments
 
@@ -2328,8 +3135,8 @@ async def get_report_by_transaction_type(
         })
 
     # Determine Date Range for Report Aggregation
-    r_start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else date.min
-    r_end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else date.max
+    r_start = parse_date_value(start_date)
+    r_end = parse_date_value(end_date)
 
     for tx_type in ['KULU', 'DEBT', 'OTHER']:
         type_loans = [l for l in loans if get_loan_type(l) == tx_type]
@@ -2341,7 +3148,7 @@ async def get_report_by_transaction_type(
         for lid in type_lids:
             splits = loan_payment_splits.get(lid, [])
             for s in splits:
-                if r_start <= s['date'] <= r_end:
+                if (not r_start or s['date'] >= r_start) and (not r_end or s['date'] <= r_end):
                     p_collected_in_period += s['p_col']
                     i_collected_in_period += s['i_col']
 
