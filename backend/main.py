@@ -3,21 +3,29 @@ Diamond Fincorp Loan Management System - Enterprise Backend API
 FastAPI server with Excel backend - Enterprise Grade with Full Feature Set
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 from enum import Enum
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+# openpyxl styles removed — only needed by the deleted ExcelDB class
 import os
 import re
 import threading
+import time
+from io import BytesIO
+from email.message import EmailMessage
+import smtplib
 from decimal import Decimal
 import logging
 import json
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+import shutil
+from pathlib import Path
 from sqlalchemy import create_engine, text, Table, Column, String, Float, MetaData, Integer, DateTime
 from sqlalchemy.orm import declarative_base, Session
 from sqlalchemy.exc import ProgrammingError
@@ -27,22 +35,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-# Resolve absolute path dynamically so the workbook path stays configurable via EXCEL_DB_PATH.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB_PATH = os.path.normpath(os.path.join(BASE_DIR, '..', 'excel_schema', 'LoanManagement_DB.xlsx'))
-LOCAL_DB_PATH = os.path.normpath(os.path.join(BASE_DIR, 'LoanManagement_DB.xlsx'))
-EXCEL_DB_PATH = os.environ.get('EXCEL_DB_PATH')
-if EXCEL_DB_PATH:
-    EXCEL_DB_PATH = os.path.normpath(EXCEL_DB_PATH)
-else:
-    EXCEL_DB_PATH = next(
-        (candidate for candidate in [DEFAULT_DB_PATH, LOCAL_DB_PATH] if os.path.exists(candidate)),
-        DEFAULT_DB_PATH
-    )
-WORKBOOK_SCHEMA_VERSION = '2026-03-19-enterprise-v1'
+LOCAL_SQLITE_PATH = os.path.join(BASE_DIR, 'loan_management_local.db')
+UPDATED_SOURCE_WORKBOOK = os.path.join(BASE_DIR, '..', 'Diamond Fincorp Master Data.xlsx')
+LEGACY_SOURCE_WORKBOOK = os.path.join(BASE_DIR, '..', 'excel_schema', 'DIAMOND FINANCE DATA.xlsm')
+LOCAL_SOURCE_WORKBOOK = UPDATED_SOURCE_WORKBOOK if os.path.exists(UPDATED_SOURCE_WORKBOOK) else LEGACY_SOURCE_WORKBOOK
 
 APP_ENV = os.environ.get('APP_ENV', os.environ.get('ENV', 'development')).strip().lower()
 IS_DEVELOPMENT = APP_ENV in {'development', 'dev', 'local', 'debug'}
+CUSTOMER_ASSET_ROOT = os.path.join(BASE_DIR, 'uploads', 'customers')
+MAX_CUSTOMER_ASSET_BYTES = 10 * 1024 * 1024
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
+DOCUMENT_EXTENSIONS = {'.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png'}
+SNAPSHOT_ROOT = os.path.join(BASE_DIR, 'snapshots')
+SNAPSHOT_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Kolkata')
+SNAPSHOT_EMAIL = os.environ.get('SNAPSHOT_EMAIL', '').strip()
+SMTP_HOST = os.environ.get('SMTP_HOST', '').strip()
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587') or '587')
+SMTP_USER = os.environ.get('SMTP_USER', '').strip()
+SMTP_PASS = os.environ.get('SMTP_PASS', '').strip()
+SNAPSHOT_ADMIN_TOKEN = os.environ.get('SNAPSHOT_ADMIN_TOKEN', '').strip()
+SNAPSHOT_SHEETS = ['Customers', 'Loans', 'Payments', 'Help', 'CapitalInjections', 'AuditLog']
+
+def using_sqlite_database(database_url: str) -> bool:
+    return str(database_url or '').strip().lower().startswith('sqlite:')
+
+def default_local_database_url() -> str:
+    sqlite_path = LOCAL_SQLITE_PATH.replace('\\', '/')
+    return f"sqlite:///{sqlite_path}"
 
 def parse_allowed_origins() -> List[str]:
     configured = os.environ.get('ALLOWED_ORIGINS', '').strip()
@@ -64,56 +84,174 @@ def ensure_debug_access():
     if not IS_DEVELOPMENT:
         raise HTTPException(status_code=403, detail="Debug endpoints are disabled outside development")
 
-# Sheet name mappings - maps internal names to actual Excel sheet names
-# User's Excel uses: Loan_Master, Borrower_Master, Payment_Transactions
-SHEET_NAMES = {
-    'Loans': 'Loan_Master',
-    'Customers': 'Borrower_Master', 
-    'Payments': 'Payment_Transactions',
-    'Help': 'HELP',
-    'CapitalInjections': 'CapitalInjections',
-    'AuditLog': 'AuditLog',
-    'SystemConfig': 'SystemConfig'
-}
+def ensure_directory(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-# Column name mappings - maps internal names to actual Excel column names
-# This allows flexibility for different Excel schemas
-COLUMN_MAPPINGS = {
-    # Loan columns
-    'loan_id': ['LoanID', 'loan_id', 'Loan_ID', 'loanid'],
-    'customer_id': ['BorrowerId', 'customer_id', 'CustomerID', 'borrower_id'],
-    'principal_amount': ['principal_amount', 'Principal', 'PrincipalAmount', 'Amount'],
-    'interest_rate': ['interest_rate', 'InterestRate', 'Rate', 'interest'],
-    'start_date': ['start_date', 'StartDate', 'Date', 'LoanDate'],
-    'status': ['status', 'Status', 'LoanStatus'],
-    'type': ['type', 'Type', 'LoanType', 'transaction_type'],
-    
-    # Payment columns
-    'payment_id': ['payment_id', 'PaymentID', 'TransactionID'],
-    'payment_date': ['payment_date', 'PaymentDate', 'Date', 'TransactionDate'],
-    'amount': ['amount', 'Amount', 'PaymentAmount'],
-    'payment_type': ['payment_type', 'PaymentType', 'Type'],
-    'principal_amount': ['principal_amount', 'PrincipalAmount', 'principal_paid', 'principal_component'],
-    'interest_amount': ['interest_amount', 'InterestAmount', 'interest_paid', 'interest_component'],
-    
-    # Borrower columns
-    'name': ['name', 'Name', 'BorrowerName', 'CustomerName']
-}
+def get_customer_asset_dir(customer_id: str) -> str:
+    return os.path.join(CUSTOMER_ASSET_ROOT, customer_id)
 
-def get_column_value(row: dict, column_key: str, default=None):
-    """Get value from row using flexible column name matching"""
-    if column_key in COLUMN_MAPPINGS:
-        for possible_name in COLUMN_MAPPINGS[column_key]:
-            if possible_name in row and row[possible_name] is not None:
-                return row[possible_name]
-    # Direct access if not in mappings
-    if column_key in row:
-        return row[column_key]
-    return default
+def get_customer_asset_metadata_path(customer_id: str) -> str:
+    return os.path.join(get_customer_asset_dir(customer_id), 'metadata.json')
 
-def get_sheet_name(internal_name: str) -> str:
-    """Get actual sheet name from internal name"""
-    return SHEET_NAMES.get(internal_name, internal_name)
+def load_customer_asset_metadata(customer_id: str) -> Dict[str, Any]:
+    metadata_path = get_customer_asset_metadata_path(customer_id)
+    if not os.path.exists(metadata_path):
+        return {'photo': None, 'documents': []}
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {'photo': None, 'documents': []}
+    return {
+        'photo': payload.get('photo'),
+        'documents': payload.get('documents', [])
+    }
+
+def save_customer_asset_metadata(customer_id: str, metadata: Dict[str, Any]) -> None:
+    asset_dir = get_customer_asset_dir(customer_id)
+    ensure_directory(asset_dir)
+    with open(get_customer_asset_metadata_path(customer_id), 'w', encoding='utf-8') as handle:
+        json.dump(metadata, handle, ensure_ascii=True, indent=2)
+
+def build_customer_asset_response(customer_id: str, asset: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not asset:
+        return None
+    response = dict(asset)
+    response['download_url'] = f"/customers/{customer_id}/assets/{asset['asset_id']}"
+    return response
+
+def attach_customer_assets(customer: Dict[str, Any]) -> Dict[str, Any]:
+    customer_id = str(customer.get('customer_id') or customer.get('id') or '')
+    metadata = load_customer_asset_metadata(customer_id) if customer_id else {'photo': None, 'documents': []}
+    enriched = dict(customer)
+    enriched['photo'] = build_customer_asset_response(customer_id, metadata.get('photo')) if customer_id else None
+    enriched['documents'] = [
+        build_customer_asset_response(customer_id, asset)
+        for asset in metadata.get('documents', [])
+        if asset
+    ] if customer_id else []
+    return enriched
+
+def get_snapshot_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(SNAPSHOT_TIMEZONE)
+    except Exception:
+        logger.warning("Invalid APP_TIMEZONE %s. Falling back to Asia/Kolkata.", SNAPSHOT_TIMEZONE)
+        return ZoneInfo('Asia/Kolkata')
+
+def ensure_snapshot_admin(x_admin_token: Optional[str]) -> None:
+    if not SNAPSHOT_ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Snapshot trigger is not configured")
+    if str(x_admin_token or '').strip() != SNAPSHOT_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Admin authorization failed")
+
+def build_snapshot_workbook() -> Dict[str, Any]:
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    row_counts: Dict[str, int] = {}
+
+    for internal_name in SNAPSHOT_SHEETS:
+        rows = db.get_all_rows(internal_name)
+        worksheet = workbook.create_sheet(title=internal_name[:31])
+        row_counts[internal_name] = len(rows)
+
+        if not rows:
+            worksheet.append(['No data'])
+            continue
+
+        headers = list(rows[0].keys())
+        worksheet.append(headers)
+        for row in rows:
+            worksheet.append([row.get(header, '') for header in headers])
+
+    stream = BytesIO()
+    workbook.save(stream)
+    content = stream.getvalue()
+    snapshot_date = datetime.now(get_snapshot_timezone()).strftime('%Y-%m-%d')
+    filename = f"VAIRAM_FINCORP_Snapshot_{snapshot_date}.xlsx"
+    ensure_directory(SNAPSHOT_ROOT)
+    file_path = os.path.join(SNAPSHOT_ROOT, filename)
+    with open(file_path, 'wb') as handle:
+        handle.write(content)
+
+    return {
+        'filename': filename,
+        'file_path': file_path,
+        'content': content,
+        'row_counts': row_counts,
+        'size_bytes': len(content),
+        'snapshot_date': snapshot_date
+    }
+
+def send_snapshot_email(snapshot_payload: Dict[str, Any]) -> None:
+    if not SNAPSHOT_EMAIL:
+        raise RuntimeError("SNAPSHOT_EMAIL is not configured")
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        raise RuntimeError("SMTP credentials are incomplete")
+
+    message = EmailMessage()
+    message['Subject'] = f"VAIRAM FINCORP - Daily Snapshot [{snapshot_payload['snapshot_date']}]"
+    message['From'] = SMTP_USER
+    message['To'] = SNAPSHOT_EMAIL
+    counts_text = '\n'.join([f"- {name}: {count} rows" for name, count in snapshot_payload['row_counts'].items()])
+    message.set_content(
+        "Daily database snapshot generated successfully.\n\n"
+        f"Sheets:\n{counts_text}\n\n"
+        f"Attachment size: {snapshot_payload['size_bytes']} bytes\n"
+    )
+    message.add_attachment(
+        snapshot_payload['content'],
+        maintype='application',
+        subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename=snapshot_payload['filename']
+    )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(message)
+
+def execute_snapshot_job(trigger_source: str = 'scheduler') -> Dict[str, Any]:
+    started_at = datetime.now(get_snapshot_timezone()).isoformat()
+    try:
+        snapshot_payload = build_snapshot_workbook()
+        send_snapshot_email(snapshot_payload)
+        logger.info(
+            "[%s] Snapshot job succeeded at %s with %s bytes",
+            trigger_source,
+            started_at,
+            snapshot_payload['size_bytes']
+        )
+        return {
+            'status': 'success',
+            'trigger_source': trigger_source,
+            'filename': snapshot_payload['filename'],
+            'row_counts': snapshot_payload['row_counts'],
+            'size_bytes': snapshot_payload['size_bytes']
+        }
+    except Exception as exc:
+        logger.exception("[%s] Snapshot job failed at %s", trigger_source, started_at)
+        return {
+            'status': 'failed',
+            'trigger_source': trigger_source,
+            'error': str(exc)
+        }
+
+def snapshot_scheduler_loop() -> None:
+    last_run_date = ''
+    timezone = get_snapshot_timezone()
+    while True:
+        try:
+            now = datetime.now(timezone)
+            today = now.strftime('%Y-%m-%d')
+            if now.hour == 23 and now.minute == 0 and today != last_run_date:
+                result = execute_snapshot_job('scheduler')
+                if result.get('status') == 'success':
+                    last_run_date = today
+            time.sleep(30)
+        except Exception:
+            logger.exception("Snapshot scheduler loop failed")
+            time.sleep(60)
 
 app = FastAPI(
     title="Diamond Fincorp Loan Management API",
@@ -130,12 +268,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def start_snapshot_scheduler():
+    thread = threading.Thread(target=snapshot_scheduler_loop, daemon=True, name='snapshot-scheduler')
+    thread.start()
+    logger.info("Snapshot scheduler started for 11:00 PM daily in %s", SNAPSHOT_TIMEZONE)
+
 @app.get("/")
 async def serve_frontend():
     frontend_path = os.path.join(BASE_DIR, '..', 'frontend', 'index.html')
     if os.path.exists(frontend_path):
-        return FileResponse(frontend_path)
+        return FileResponse(frontend_path, headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        })
     return {"message": "Frontend file not found"}
+
+@app.get("/brand-logo")
+async def serve_brand_logo():
+    logo_path = os.path.join(BASE_DIR, '..', 'vairam fincorp.png')
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type='image/png')
+    raise HTTPException(status_code=404, detail="Brand logo not found")
 
 # ==================== ENUMS ====================
 
@@ -146,13 +301,15 @@ class TransactionType(str, Enum):
 class LoanStatus(str, Enum):
     ACTIVE = "ACTIVE"
     COMPLETED = "COMPLETED"
-    DEFAULTED = "DEFAULTED"
-    WRITTEN_OFF = "WRITTEN_OFF"
+    HELP = "HELP"
+    LOSS = "LOSS"
+    CLOSED = "CLOSED"
 
 class PaymentType(str, Enum):
     PRINCIPAL = "PRINCIPAL"
     INTEREST = "INTEREST"
     BOTH = "BOTH"
+    BALANCE = "BALANCE"
 
 class CapitalSourceType(str, Enum):
     SALARY = "SALARY"
@@ -166,7 +323,7 @@ class CapitalSourceType(str, Enum):
 class Customer(BaseModel):
     customer_id: Optional[str] = None
     name: str
-    phone: str
+    phone: Optional[str] = ''
     email: Optional[str] = None
     address: Optional[str] = None
     id_proof_type: Optional[str] = None
@@ -180,6 +337,8 @@ class Loan(BaseModel):
     customer_id: str
     principal_amount: float
     add_on_principal: Optional[float] = 0.0
+    fresh_principal: Optional[float] = None
+    new_disbursed_amount: Optional[float] = None
     interest_rate: float
     loan_type: str = 'PERSONAL'
     transaction_type: str = 'KULU'  # KULU, DEBT, OTHER
@@ -196,6 +355,10 @@ class Loan(BaseModel):
     waiver_date: Optional[date] = None
     created_date: Optional[datetime] = None
     closed_date: Optional[datetime] = None
+    parent_loan_id: Optional[str] = None
+    rollover_source_loan_id: Optional[str] = None
+    loan_chain_id: Optional[str] = None
+    chain_start_date: Optional[date] = None
     notes: Optional[str] = None
 
 class Payment(BaseModel):
@@ -217,7 +380,15 @@ class Payment(BaseModel):
     repayment_date: Optional[date] = None
     repayment_amount: Optional[float] = None
     help_status: Optional[str] = None
+    is_virtual: Optional[bool] = None
+    linked_successor_loan_id: Optional[str] = None
     notes: Optional[str] = None
+
+    @validator('repayment_date', pre=True)
+    def normalize_blank_repayment_date(cls, value):
+        if value in ('', None):
+            return None
+        return value
 
 class HelpRecord(BaseModel):
     help_id: Optional[str] = None
@@ -260,6 +431,7 @@ class LoanSummary(BaseModel):
     loan_id: str
     customer_name: str
     principal_amount: float
+    fresh_principal: float
     add_on_principal: float
     effective_principal_amount: float
     net_disbursed_amount: float
@@ -272,6 +444,10 @@ class LoanSummary(BaseModel):
     transaction_type: str
     debt_interest_mode: str
     status: str
+    parent_loan_id: Optional[str] = None
+    loan_chain_id: Optional[str] = None
+    chain_start_date: Optional[str] = None
+    chain_start_date_iso: Optional[str] = None
     start_date: str
     start_date_iso: Optional[str] = None
     months_active: int
@@ -308,315 +484,8 @@ class CapitalSummary(BaseModel):
 
 # ==================== DATABASE OPERATIONS ====================
 
-class ExcelDB:
-    """Excel database handler with thread-safe operations"""
-    
-    def __init__(self, filepath):
-        self.filepath = filepath
-        self._id_lock = threading.Lock()
-        self._ensure_file_exists()
-        self._ensure_schema_updated()
-    
-    def _ensure_file_exists(self):
-        if not os.path.exists(self.filepath):
-            raise FileNotFoundError(f"Database file not found: {self.filepath}")
-    
-    def _ensure_schema_updated(self):
-        """Ensure new columns and sheets exist for enterprise features"""
-        wb = openpyxl.load_workbook(self.filepath)
-        modified = False
-        ws_config = self._get_worksheet(wb, 'SystemConfig')
-        config_rows = {
-            str(row[0].value): row
-            for row in ws_config.iter_rows(min_row=2, values_only=False)
-            if row[0].value
-        }
-        schema_row = config_rows.get('schema_version')
-        if schema_row and str(schema_row[1].value or '').strip() == WORKBOOK_SCHEMA_VERSION:
-            wb.close()
-            return
-
-        def ensure_columns(sheet_alias: str, column_defaults: Dict[str, Any]):
-            nonlocal modified
-            try:
-                ws = self._get_worksheet(wb, sheet_alias)
-            except KeyError:
-                return
-
-            headers = [cell.value for cell in ws[1]]
-            for col_name, default_value in column_defaults.items():
-                if col_name in headers:
-                    continue
-
-                col_idx = len(headers) + 1
-                ws.cell(row=1, column=col_idx, value=col_name)
-                headers.append(col_name)
-                modified = True
-
-                for row_idx in range(2, ws.max_row + 1):
-                    if not ws.cell(row=row_idx, column=1).value:
-                        continue
-                    if callable(default_value):
-                        ws.cell(row=row_idx, column=col_idx, value=default_value(ws, row_idx))
-                    else:
-                        ws.cell(row=row_idx, column=col_idx, value=default_value)
-
-        def add_sheet(sheet_name: str, headers: List[str]):
-            nonlocal modified
-            if sheet_name in wb.sheetnames:
-                return
-
-            ws = wb.create_sheet(sheet_name)
-            ws.append(headers)
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws.freeze_panes = 'A2'
-            modified = True
-
-        ensure_columns('Loans', {
-            'add_on_principal': 0,
-            'transaction_type': 'OTHER',
-            'debt_interest_mode': 'subsequent_collection',
-            'pre_deducted_interest': 0,
-            'net_disbursed_amount': '',
-            'original_interest_amount': 0,
-            'waived_interest_amount': 0,
-            'waiver_reason': '',
-            'waiver_date': ''
-        })
-
-        ensure_columns('Payments', {
-            'principal_amount': 0,
-            'interest_amount': lambda ws, row_idx: ws.cell(row=row_idx, column=5).value or 0,
-            'help_category': 'None'
-        })
-
-        add_sheet('CapitalInjections', [
-            'injection_id',
-            'source_type',
-            'amount',
-            'injection_date',
-            'description',
-            'created_by',
-            'created_date'
-        ])
-
-        add_sheet('AuditLog', [
-            'log_id',
-            'entity_type',
-            'entity_id',
-            'action',
-            'old_value',
-            'new_value',
-            'user',
-            'timestamp'
-        ])
-
-        add_sheet('HELP', [
-            'HelpID',
-            'CustomerID',
-            'CustomerName',
-            'HelpDate',
-            'HelpAmount',
-            'HelpCategory',
-            'HelpNote',
-            'RepaymentDate',
-            'RepaymentAmount',
-            'Status'
-        ])
-
-        config_keys = list(config_rows.keys())
-
-        for config_key, description in [
-            ('next_injection_id', 'Next capital injection ID'),
-            ('next_audit_id', 'Next audit log ID'),
-            ('next_help_id', 'Next help ID')
-        ]:
-            if config_key not in config_keys:
-                ws_config.append([config_key, '1', description, datetime.now()])
-                modified = True
-        if schema_row:
-            schema_row[1].value = WORKBOOK_SCHEMA_VERSION
-            schema_row[2].value = 'Workbook schema version'
-            schema_row[3].value = datetime.now()
-            modified = True
-        else:
-            ws_config.append(['schema_version', WORKBOOK_SCHEMA_VERSION, 'Workbook schema version', datetime.now()])
-            modified = True
-        
-        if modified:
-            wb.save(self.filepath)
-            logger.info("Database schema updated for enterprise features")
-        
-        wb.close()
-    
-
-        
-    def _load_workbook(self):
-        """Load workbook with data_only=True to get calculated values"""
-        return openpyxl.load_workbook(self.filepath, data_only=True)
-    
-    def _save_workbook(self, wb):
-        """Save workbook safely"""
-        wb.save(self.filepath)
-
-    def _get_worksheet(self, wb, sheet_name: str):
-        """
-        Resolve logical sheet name (e.g. 'Loans', 'Customers') to the actual
-        Excel worksheet name using the central SHEET_NAMES mapping.
-        Falls back to the provided name if a direct match exists.
-        """
-        actual_sheet_name = get_sheet_name(sheet_name)
-        if actual_sheet_name in wb.sheetnames:
-            return wb[actual_sheet_name]
-        if sheet_name in wb.sheetnames:
-            return wb[sheet_name]
-        logger.warning(
-            f"Sheet '{sheet_name}' (mapped to '{actual_sheet_name}') not found. "
-            f"Available sheets: {wb.sheetnames}"
-        )
-        raise KeyError(f"Worksheet for '{sheet_name}' not found")
-    
-    def get_next_id(self, id_type: str) -> str:
-        """Get next sequential ID for customers, loans, payments, etc."""
-        with self._id_lock:
-            wb = openpyxl.load_workbook(self.filepath)
-            ws = self._get_worksheet(wb, 'SystemConfig')
-            
-            config_map = {
-                'customer': 'next_customer_id',
-                'loan': 'next_loan_id',
-                'payment': 'next_payment_id',
-                'injection': 'next_injection_id',
-                'audit': 'next_audit_id',
-                'help': 'next_help_id'
-            }
-            
-            config_key = config_map.get(id_type)
-            next_num = 1
-            
-            for row in ws.iter_rows(min_row=2, values_only=False):
-                if row[0].value == config_key:
-                    next_num = int(row[1].value)
-                    row[1].value = str(next_num + 1)
-                    row[3].value = datetime.now()
-                    break
-            
-            self._save_workbook(wb)
-            
-            prefixes = {
-                'customer': 'CUST', 
-                'loan': 'LN', 
-                'payment': 'PAY',
-                'injection': 'CAP',
-                'audit': 'AUD',
-                'help': 'HELP'
-            }
-            return f"{prefixes[id_type]}{next_num:04d}"
-    
-    def get_all_rows(self, sheet_name: str) -> List[Dict]:
-        """Get all rows from a sheet as list of dicts"""
-        wb = self._load_workbook()
-        try:
-            ws = self._get_worksheet(wb, sheet_name)
-        except KeyError:
-            # Already logged in _get_worksheet
-            return []
-        
-        headers = [cell.value for cell in ws[1]]
-        rows = []
-        
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[0] is None:  # Skip empty rows
-                continue
-            row_dict = {}
-            for i, header in enumerate(headers):
-                if header and i < len(row):
-                    row_dict[header] = row[i]
-            rows.append(row_dict)
-        
-        return rows
-    
-    def add_row(self, sheet_name: str, data: List[Any]):
-        """Add a new row to a sheet"""
-        wb = openpyxl.load_workbook(self.filepath)
-        ws = self._get_worksheet(wb, sheet_name)
-        ws.append(data)
-        self._save_workbook(wb)
-
-    def add_dict_row(self, sheet_name: str, data: Dict[str, Any]):
-        """Add a row using the actual worksheet headers as the column order"""
-        wb = openpyxl.load_workbook(self.filepath)
-        ws = self._get_worksheet(wb, sheet_name)
-        headers = [cell.value for cell in ws[1]]
-        ws.append([data.get(header, '') for header in headers])
-        self._save_workbook(wb)
-    
-    def update_row(self, sheet_name: str, id_column: str, id_value: str, updates: Dict):
-        """Update a row based on ID"""
-        wb = openpyxl.load_workbook(self.filepath)
-        ws = self._get_worksheet(wb, sheet_name)
-        
-        headers = [cell.value for cell in ws[1]]
-        id_col_idx = headers.index(id_column)
-        
-        for row in ws.iter_rows(min_row=2):
-            if row[id_col_idx].value == id_value:
-                for col_name, new_value in updates.items():
-                    if col_name in headers:
-                        col_idx = headers.index(col_name)
-                        row[col_idx].value = new_value
-                break
-        
-        self._save_workbook(wb)
-
-    def delete_row(self, sheet_name: str, id_column: str, id_value: str):
-        """Delete a row based on ID"""
-        wb = openpyxl.load_workbook(self.filepath)
-        ws = self._get_worksheet(wb, sheet_name)
-        headers = [cell.value for cell in ws[1]]
-
-        if id_column not in headers:
-            wb.close()
-            raise KeyError(f"Column '{id_column}' not found in sheet '{sheet_name}'")
-
-        id_col_idx = headers.index(id_column)
-        delete_idx = None
-
-        for row_idx in range(2, ws.max_row + 1):
-            if ws.cell(row=row_idx, column=id_col_idx + 1).value == id_value:
-                delete_idx = row_idx
-                break
-
-        if delete_idx:
-            ws.delete_rows(delete_idx, 1)
-            self._save_workbook(wb)
-        else:
-            wb.close()
-            raise KeyError(f"ID '{id_value}' not found in sheet '{sheet_name}'")
-    
-    def log_audit(self, entity_type: str, entity_id: str, action: str, old_value: Any = None, new_value: Any = None, user: str = 'USER'):
-        """Add audit log entry"""
-        audit_id = self.get_next_id('audit')
-        
-        data = [
-            audit_id,
-            entity_type,
-            entity_id,
-            action,
-            json.dumps(old_value) if old_value else '',
-            json.dumps(new_value) if new_value else '',
-            user,
-            datetime.now()
-        ]
-        
-        self.add_row('AuditLog', data)
-        return audit_id
-
 class PostgresDB:
-    """PostgreSQL database handler with identical interface to ExcelDB"""
+    """PostgreSQL database handler — sole data backend for the application"""
     TABLE_MAP = {
         'Customers': 'borrower_master',
         'Loans': 'loan_master',
@@ -628,8 +497,8 @@ class PostgresDB:
     }
     TABLE_COLUMNS = {
         'Customers': {'customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes'},
-        'Loans': {'loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date'},
-        'Payments': {'payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category'},
+        'Loans': {'loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'fresh_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date', 'parent_loan_id', 'loan_chain_id', 'chain_start_date'},
+        'Payments': {'payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category', 'is_virtual', 'linked_successor_loan_id'},
         'Help': {'help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status'},
         'CapitalInjections': {'injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date'},
         'AuditLog': {'log_id', 'entity_type', 'entity_id', 'action', 'old_value', 'new_value', 'user', 'timestamp'},
@@ -637,8 +506,8 @@ class PostgresDB:
     }
     COLUMN_ALIASES = {
         'Customers': {'BorrowerID': 'customer_id', 'BorrowerName': 'name', 'Phone': 'phone', 'Address': 'address', 'IsActive': 'status', 'CreatedOn': 'created_date'},
-        'Loans': {'LoanID': 'loan_id', 'BorrowerID': 'customer_id', 'TYPE': 'transaction_type', 'PrincipalAmount': 'principal_amount', 'AddOnPrincipal': 'add_on_principal', 'InterestRate': 'interest_rate', 'StartDate': 'start_date', 'FundSourceID': 'fund_source', 'LoanStatus': 'status', 'CreatedOn': 'created_date'},
-        'Payments': {'PaymentID': 'payment_id', 'LoanID': 'loan_id', 'Borrower': 'customer_id', 'PaymentDate': 'payment_date', 'PaymentAmount': 'amount', 'PaymentType': 'payment_type', 'Remarks': 'notes', 'CreatedOn': 'created_date'},
+        'Loans': {'LoanID': 'loan_id', 'BorrowerID': 'customer_id', 'TYPE': 'transaction_type', 'PrincipalAmount': 'principal_amount', 'AddOnPrincipal': 'add_on_principal', 'ADD ON PRINCIPAL': 'add_on_principal', 'FreshPrincipal': 'fresh_principal', 'InterestRate': 'interest_rate', 'StartDate': 'start_date', 'FundSourceID': 'fund_source', 'LoanStatus': 'status', 'CreatedOn': 'created_date', 'ParentLoanID': 'parent_loan_id', 'LoanChainID': 'loan_chain_id', 'ChainStartDate': 'chain_start_date'},
+        'Payments': {'PaymentID': 'payment_id', 'LoanID': 'loan_id', 'Borrower': 'customer_id', 'BorrowerID': 'customer_id', 'PaymentDate': 'payment_date', 'PaymentAmount': 'amount', 'PaymentType': 'payment_type', 'Remarks': 'notes', 'CreatedOn': 'created_date', 'IsVirtual': 'is_virtual', 'LinkedSuccessorLoanID': 'linked_successor_loan_id'},
         'Help': {'HelpID': 'help_id', 'CustomerID': 'customer_id', 'CustomerName': 'customer_name', 'HelpDate': 'help_date', 'HelpAmount': 'help_amount', 'HelpCategory': 'help_category', 'HelpNote': 'help_note', 'RepaymentDate': 'repayment_date', 'RepaymentAmount': 'repayment_amount', 'Status': 'status'},
         'CapitalInjections': {},
         'AuditLog': {'user': 'user'},
@@ -649,9 +518,16 @@ class PostgresDB:
         self.database_url = database_url
         if self.database_url.startswith("postgres://"):
             self.database_url = self.database_url.replace("postgres://", "postgresql://", 1)
-            
-        # Using connect_args for ssl require in railway sometimes helps, and smaller pool
-        self.engine = create_engine(self.database_url, pool_size=2, max_overflow=5, pool_timeout=30)
+        self.is_sqlite = using_sqlite_database(self.database_url)
+
+        engine_kwargs: Dict[str, Any] = {}
+        if self.is_sqlite:
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+        else:
+            # Using connect_args for ssl require in railway sometimes helps, and smaller pool
+            engine_kwargs.update(pool_size=2, max_overflow=5, pool_timeout=30)
+
+        self.engine = create_engine(self.database_url, **engine_kwargs)
         self.metadata = MetaData()
         # We don't automatically call _ensure_schema here anymore to prevent deadlocks
         # It should be called explicitly from migration/setup scripts.
@@ -674,6 +550,22 @@ class PostgresDB:
         if lowered in self._get_allowed_columns(sheet_name):
             return lowered
         return column_name
+
+    def _column_exists(self, conn, table_name: str, column_name: str) -> bool:
+        if self.is_sqlite:
+            rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+            return any(str(row.get('name') or '').lower() == column_name.lower() for row in rows)
+        query = text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = :table_name AND column_name = :column_name
+            LIMIT 1
+        """)
+        return conn.execute(query, {'table_name': table_name, 'column_name': column_name}).first() is not None
+
+    def _ensure_column(self, conn, table_name: str, column_name: str, definition: str) -> None:
+        if not self._column_exists(conn, table_name, column_name):
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"))
 
     def _ensure_schema(self):
         """Create tables if they don't exist"""
@@ -701,6 +593,7 @@ class PostgresDB:
                     customer_id VARCHAR(50),
                     principal_amount FLOAT,
                     add_on_principal FLOAT,
+                    fresh_principal FLOAT,
                     interest_rate FLOAT,
                     loan_type VARCHAR(50),
                     start_date DATE,
@@ -717,7 +610,10 @@ class PostgresDB:
                     original_interest_amount FLOAT,
                     waived_interest_amount FLOAT,
                     waiver_reason TEXT,
-                    waiver_date DATE
+                    waiver_date DATE,
+                    parent_loan_id VARCHAR(50),
+                    loan_chain_id VARCHAR(64),
+                    chain_start_date DATE
                 )
             '''))
             
@@ -737,7 +633,9 @@ class PostgresDB:
                     created_date TIMESTAMP,
                     created_by VARCHAR(100),
                     help_category VARCHAR(100),
-                    notes TEXT
+                    notes TEXT,
+                    is_virtual BOOLEAN DEFAULT FALSE,
+                    linked_successor_loan_id VARCHAR(50)
                 )
             '''))
 
@@ -809,7 +707,14 @@ class PostgresDB:
                     ON CONFLICT (config_key) DO NOTHING
                 '''), {"k": key, "v": val, "d": desc, "t": datetime.now()})
 
-            logger.info("Checked/Created PostgreSQL schema.")
+            self._ensure_column(conn, 'loan_master', 'fresh_principal', 'FLOAT')
+            self._ensure_column(conn, 'loan_master', 'parent_loan_id', 'VARCHAR(50)')
+            self._ensure_column(conn, 'loan_master', 'loan_chain_id', 'VARCHAR(64)')
+            self._ensure_column(conn, 'loan_master', 'chain_start_date', 'DATE')
+            self._ensure_column(conn, 'payment_transactions', 'is_virtual', 'BOOLEAN DEFAULT FALSE')
+            self._ensure_column(conn, 'payment_transactions', 'linked_successor_loan_id', 'VARCHAR(50)')
+
+            logger.info("Checked/Created runtime database schema.")
 
     def get_next_id(self, id_type: str) -> str:
         config_map = {
@@ -884,9 +789,9 @@ class PostgresDB:
         if sheet_name == 'Customers':
             cols = ['customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes']
         elif sheet_name == 'Loans':
-            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
+            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'fresh_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date', 'parent_loan_id', 'loan_chain_id', 'chain_start_date']
         elif sheet_name == 'Payments':
-            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category']
+            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category', 'is_virtual', 'linked_successor_loan_id']
         elif sheet_name == 'Help':
             cols = ['help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status']
         elif sheet_name == 'CapitalInjections':
@@ -936,9 +841,9 @@ class PostgresDB:
         if sheet_name == 'Customers':
             cols = ['customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes']
         elif sheet_name == 'Loans':
-            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date']
+            cols = ['loan_id', 'customer_id', 'principal_amount', 'add_on_principal', 'fresh_principal', 'interest_rate', 'loan_type', 'start_date', 'tenure_months', 'status', 'fund_source', 'created_date', 'closed_date', 'notes', 'transaction_type', 'debt_interest_mode', 'pre_deducted_interest', 'net_disbursed_amount', 'original_interest_amount', 'waived_interest_amount', 'waiver_reason', 'waiver_date', 'parent_loan_id', 'loan_chain_id', 'chain_start_date']
         elif sheet_name == 'Payments':
-            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category']
+            cols = ['payment_id', 'loan_id', 'customer_id', 'payment_date', 'amount', 'payment_type', 'payment_method', 'reference_number', 'created_date', 'created_by', 'notes', 'principal_amount', 'interest_amount', 'help_category', 'is_virtual', 'linked_successor_loan_id']
         elif sheet_name == 'Help':
             cols = ['help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status']
         elif sheet_name == 'CapitalInjections':
@@ -1007,24 +912,165 @@ class PostgresDB:
             entity_type,
             entity_id,
             action,
-            json.dumps(old_value) if old_value else '',
-            json.dumps(new_value) if new_value else '',
+            json.dumps(old_value, default=str) if old_value else '',
+            json.dumps(new_value, default=str) if new_value else '',
             user,
             datetime.now()
         ]
         self.add_row('AuditLog', data)
         return audit_id
 
-# Initialize database
-# Determine if we should use Postgres (Railway environment) or fallback to Excel Local
-RAILWAY_DB_URL = os.environ.get('DATABASE_URL')
+def get_runtime_database_url() -> str:
+    configured = str(os.environ.get('DATABASE_URL', '') or '').strip()
+    if configured:
+        return configured
+    fallback = default_local_database_url()
+    logger.warning("DATABASE_URL not set. Falling back to local SQLite database at %s", LOCAL_SQLITE_PATH)
+    return fallback
 
-if RAILWAY_DB_URL:
-    logger.info("Initializing PostgresDB connection...")
-    db = PostgresDB(RAILWAY_DB_URL)
-else:
-    logger.info("Initializing ExcelDB connection...")
-    db = ExcelDB(EXCEL_DB_PATH)
+def _seed_local_database_from_excel(db: PostgresDB) -> None:
+    if not db.is_sqlite:
+        return
+
+    db._ensure_schema()
+
+    existing_counts = {
+        'customers': len(db.get_all_rows('Customers')),
+        'loans': len(db.get_all_rows('Loans')),
+        'payments': len(db.get_all_rows('Payments'))
+    }
+    if any(existing_counts.values()):
+        logger.info("Using existing local SQLite data: %s", existing_counts)
+        return
+
+    source_path = Path(LOCAL_SOURCE_WORKBOOK)
+    if not source_path.exists():
+        logger.warning("Local seed workbook not found at %s. Starting with an empty SQLite database.", source_path)
+        return
+
+    from migrate_from_excel import load_source_records, deduplicate_loans, validate_records
+
+    logger.info("Seeding local SQLite database from %s", source_path)
+    records = load_source_records(source_path)
+    deduplicate_loans(records)
+
+    validation_issues = validate_records(records)
+    for issue in validation_issues:
+        logger.warning("Local seed validation issue: %s", issue)
+
+    with db.engine.begin() as conn:
+        for table_name in [
+            'audit_log',
+            'help_records',
+            'payment_transactions',
+            'capital_injections',
+            'loan_master',
+            'borrower_master',
+            'system_config'
+        ]:
+            conn.execute(text(f"DELETE FROM {table_name}"))
+
+        for batch_start in range(0, len(records['customers']), 500):
+            batch = records['customers'][batch_start:batch_start + 500]
+            conn.execute(
+                text("""
+                    INSERT INTO borrower_master
+                    (customer_id, name, phone, email, address, id_proof_type,
+                     id_proof_number, status, created_date, notes)
+                    VALUES (:customer_id, :name, :phone, :email, :address,
+                            :id_proof_type, :id_proof_number, :status,
+                            :created_date, :notes)
+                """),
+                batch
+            )
+
+        for batch_start in range(0, len(records['loans']), 500):
+            batch = records['loans'][batch_start:batch_start + 500]
+            conn.execute(
+                text("""
+                    INSERT INTO loan_master
+                    (loan_id, customer_id, principal_amount, add_on_principal,
+                     fresh_principal,
+                     interest_rate, loan_type, start_date, tenure_months, status,
+                     fund_source, created_date, closed_date, notes,
+                     transaction_type, debt_interest_mode, pre_deducted_interest,
+                     net_disbursed_amount, original_interest_amount,
+                     waived_interest_amount, waiver_reason, waiver_date,
+                     parent_loan_id, loan_chain_id, chain_start_date)
+                    VALUES (:loan_id, :customer_id, :principal_amount,
+                            :add_on_principal, :fresh_principal, :interest_rate, :loan_type,
+                            :start_date, :tenure_months, :status, :fund_source,
+                            :created_date, :closed_date, :notes,
+                            :transaction_type, :debt_interest_mode,
+                            :pre_deducted_interest, :net_disbursed_amount,
+                            :original_interest_amount, :waived_interest_amount,
+                            :waiver_reason, :waiver_date,
+                            :parent_loan_id, :loan_chain_id, :chain_start_date)
+                """),
+                batch
+            )
+
+        for batch_start in range(0, len(records['payments']), 500):
+            batch = records['payments'][batch_start:batch_start + 500]
+            conn.execute(
+                text("""
+                    INSERT INTO payment_transactions
+                    (payment_id, loan_id, customer_id, payment_date, amount,
+                     payment_type, payment_method, reference_number,
+                     created_date, created_by, notes,
+                     principal_amount, interest_amount, help_category,
+                     is_virtual, linked_successor_loan_id)
+                    VALUES (:payment_id, :loan_id, :customer_id, :payment_date,
+                            :amount, :payment_type, :payment_method,
+                            :reference_number, :created_date, :created_by,
+                            :notes, :principal_amount, :interest_amount,
+                            :help_category, :is_virtual, :linked_successor_loan_id)
+                """),
+                batch
+            )
+
+        max_customer = max((int(re.search(r"(\d+)", item['customer_id']).group(1)) for item in records['customers'] if re.search(r"(\d+)", item['customer_id'])), default=0)
+        max_loan = max((int(re.search(r"(\d+)", item['loan_id']).group(1)) for item in records['loans'] if re.search(r"(\d+)", item['loan_id'])), default=0)
+        max_payment = max((int(re.search(r"(\d+)", item['payment_id']).group(1)) for item in records['payments'] if re.search(r"(\d+)", item['payment_id'])), default=0)
+        now = datetime.now()
+        for key, value, description in [
+            ('next_customer_id', str(max_customer + 1), 'Next customer ID'),
+            ('next_loan_id', str(max_loan + 1), 'Next loan ID'),
+            ('next_payment_id', str(max_payment + 1), 'Next payment ID'),
+            ('next_injection_id', '1', 'Next capital injection ID'),
+            ('next_audit_id', '1', 'Next audit log ID'),
+            ('next_help_id', '1', 'Next help ID')
+        ]:
+            conn.execute(
+                text("""
+                    INSERT INTO system_config (config_key, config_value, description, last_updated)
+                    VALUES (:key, :value, :description, :last_updated)
+                    ON CONFLICT(config_key) DO UPDATE SET
+                        config_value = excluded.config_value,
+                        description = excluded.description,
+                        last_updated = excluded.last_updated
+                """),
+                {
+                    'key': key,
+                    'value': value,
+                    'description': description,
+                    'last_updated': now
+                }
+            )
+
+    logger.info(
+        "Seeded local SQLite database from Excel: %s customers, %s loans, %s payments",
+        len(records['customers']),
+        len(records['loans']),
+        len(records['payments'])
+    )
+
+DATABASE_URL = get_runtime_database_url()
+logger.info("Initializing runtime database connection...")
+db = PostgresDB(DATABASE_URL)
+db._ensure_schema()
+if db.is_sqlite:
+    _seed_local_database_from_excel(db)
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -1032,16 +1078,87 @@ def calculate_interest_accrued(principal: float, rate: float, start_date: date, 
     """Calculate simple interest accrued"""
     if end_date is None:
         end_date = datetime.now().date()
-    
+
     if isinstance(start_date, datetime):
         start_date = start_date.date()
-    
+
+    if isinstance(end_date, datetime):
+        end_date = end_date.date()
+
+    if principal <= 0 or rate <= 0 or not start_date or not end_date or end_date <= start_date:
+        return 0.0
+
     days = (end_date - start_date).days
     months = days / 30.0  # Approximate months
-    
+
     # Simple interest calculation
     interest = principal * rate * months
     return round(interest, 2)
+
+def calculate_interest_accrued_for_loan(
+    loan_record: Dict[str, Any],
+    payment_rows: Optional[List[Dict[str, Any]]] = None,
+    end_date: Optional[date] = None
+) -> float:
+    """Accrue interest across payment intervals so principal paydowns reduce future interest."""
+    if end_date is None:
+        end_date = datetime.now().date()
+    if isinstance(end_date, datetime):
+        end_date = end_date.date()
+
+    start_date = parse_date_value(first_present(loan_record, ['start_date_iso', 'start_date', 'StartDate', 'LoanDate', 'Date']))
+    rate = to_float(first_present(loan_record, ['interest_rate', 'InterestRate', 'Rate']), 0)
+    running_principal = round(to_float(loan_record.get('principal_amount')), 2)
+
+    if not start_date or running_principal <= 0 or rate <= 0:
+        return 0.0
+
+    accrued_interest = 0.0
+    cursor = start_date
+
+    def payment_sort_key(payment: Dict[str, Any]):
+        return (
+            payment.get('payment_date_iso') or format_iso_date(payment.get('payment_date')) or '',
+            payment.get('created_date_iso') or format_iso_date(payment.get('created_date')) or '',
+            payment.get('payment_id', '')
+        )
+
+    for payment in sorted(payment_rows or [], key=payment_sort_key):
+        if is_virtual_payment(payment):
+            continue
+        payment_date = parse_date_value(
+            payment.get('payment_date_iso')
+            or payment.get('payment_date')
+            or payment.get('PaymentDate')
+        )
+        if not payment_date:
+            continue
+
+        accrual_end = min(payment_date, end_date)
+        if accrual_end > cursor:
+            accrued_interest = round(
+                accrued_interest + calculate_interest_accrued(running_principal, rate, cursor, accrual_end),
+                2
+            )
+            cursor = accrual_end
+
+        if payment_date > end_date:
+            break
+
+        split = resolve_payment_components(payment, running_principal)
+        running_principal = round(max(0, running_principal - split['principal_amount']), 2)
+        cursor = max(cursor, payment_date)
+
+        if running_principal <= 0:
+            break
+
+    if end_date > cursor and running_principal > 0:
+        accrued_interest = round(
+            accrued_interest + calculate_interest_accrued(running_principal, rate, cursor, end_date),
+            2
+        )
+
+    return round(accrued_interest, 2)
 
 def get_loan_type(loan: dict) -> str:
     """
@@ -1101,6 +1218,8 @@ def to_optional_money(value: Any) -> Any:
 
 def validate_phone_number(phone: str) -> str:
     normalized = re.sub(r'[\s\-]', '', str(phone or '').strip())
+    if not normalized:
+        return ''
     if not re.fullmatch(r'\+?\d{10,15}', normalized):
         raise HTTPException(status_code=400, detail="Phone number must contain 10 to 15 digits")
     return normalized
@@ -1145,6 +1264,15 @@ def title_case_status(value: Any, default: str = 'Active') -> str:
         raw = default
     return ' '.join(part.capitalize() for part in raw.split())
 
+def normalize_customer_status_value(value: Any, default: str = 'Active') -> str:
+    raw = str(value or '').strip().lower()
+    if raw in {'yes', 'true', '1', 'active'}:
+        return 'Active'
+    if raw in {'no', 'false', '0', 'inactive'}:
+        return 'Inactive'
+    normalized = title_case_status(value, default)
+    return normalized or default
+
 def resolve_debt_interest_mode(record: Dict[str, Any]) -> str:
     raw_mode = str(first_present(record, ['debt_interest_mode', 'DebtInterestMode'], 'subsequent_collection')).strip().lower()
     if raw_mode not in DEBT_INTEREST_MODES:
@@ -1157,9 +1285,41 @@ def get_raw_principal_amount(record: Dict[str, Any]) -> float:
 def get_add_on_principal_amount(record: Dict[str, Any]) -> float:
     return round(max(0, to_float(first_present(record, ['add_on_principal', 'AddOnPrincipal', 'addOnPrincipal']))), 2)
 
-def get_effective_principal_amount(record: Dict[str, Any]) -> float:
-    # BUSINESS RULE: reporting principal excludes add_on_principal while preserving the stored raw principal.
+def get_fresh_principal_amount(record: Dict[str, Any]) -> float:
+    explicit = first_present(record, ['fresh_principal', 'FreshPrincipal'])
+    if explicit not in (None, ''):
+        return round(max(0, to_float(explicit)), 2)
     return round(max(0, get_raw_principal_amount(record) - get_add_on_principal_amount(record)), 2)
+
+def get_effective_principal_amount(record: Dict[str, Any]) -> float:
+    # Reporting cash deployment is the fresh principal actually disbursed now.
+    return get_fresh_principal_amount(record)
+
+def get_reporting_disbursed_amount(record: Dict[str, Any]) -> float:
+    return get_effective_principal_amount(record)
+
+def get_reporting_principal_collected_amount(record: Dict[str, Any]) -> float:
+    raw_collected = round(to_float(first_present(record, ['principal_paid', 'PrincipalPaid', 'principal_collected', 'principal_recovered'])), 2)
+    return round(max(0, raw_collected), 2)
+
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    if value in (None, ''):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text_value = str(value).strip().lower()
+    if text_value in {'1', 'true', 't', 'yes', 'y'}:
+        return True
+    if text_value in {'0', 'false', 'f', 'no', 'n'}:
+        return False
+    return default
+
+def is_virtual_payment(record: Dict[str, Any]) -> bool:
+    explicit = first_present(record, ['is_virtual', 'IsVirtual'])
+    payment_type = str(first_present(record, ['payment_type', 'PaymentType', 'Type'], '') or '').strip().upper()
+    return coerce_bool(explicit, default=payment_type == 'BALANCE')
 
 def resolve_payment_components(payment: Dict[str, Any], remaining_principal: float) -> Dict[str, float]:
     total_amount = round(to_float(payment.get('total_amount', payment.get('amount'))), 2)
@@ -1169,6 +1329,15 @@ def resolve_payment_components(payment: Dict[str, Any], remaining_principal: flo
 
     if total_amount <= 0 and (principal_amount > 0 or interest_amount > 0):
         total_amount = round(principal_amount + interest_amount, 2)
+
+    if payment_type == 'BALANCE':
+        principal_amount = total_amount or principal_amount
+        interest_amount = 0.0
+        return {
+            'principal_amount': round(max(0, principal_amount), 2),
+            'interest_amount': 0.0,
+            'total_amount': round(total_amount or principal_amount, 2)
+        }
 
     if principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
         if payment_type == 'PRINCIPAL':
@@ -1221,11 +1390,7 @@ def normalize_customer(record: Dict[str, Any]) -> Dict[str, Any]:
     customer_id = str(first_present(record, ['customer_id', 'CustomerID', 'BorrowerID', 'BorrowerId', 'CustomerId', 'id'], '') or '')
     name = str(first_present(record, ['name', 'Name', 'BorrowerName', 'CustomerName'], customer_id) or customer_id)
     created_date = first_present(record, ['created_date', 'CreatedOn', 'createdDate'])
-    status = title_case_status(first_present(record, ['status', 'Status', 'IsActive'], 'ACTIVE'))
-    if str(first_present(record, ['status', 'Status'], '')).strip() == '' and str(first_present(record, ['IsActive'], '')).strip().lower() in {'yes', 'true', '1'}:
-        status = 'Active'
-    elif str(first_present(record, ['status', 'Status'], '')).strip() == '' and str(first_present(record, ['IsActive'], '')).strip():
-        status = 'Inactive'
+    status = normalize_customer_status_value(first_present(record, ['status', 'Status', 'IsActive'], 'ACTIVE'))
 
     return {
         'id': customer_id,
@@ -1246,14 +1411,14 @@ def infer_payment_split(total_amount: float, payment_type: Optional[str], princi
     total = round(to_float(total_amount), 2)
     principal = round(to_float(principal_amount), 2)
     interest = round(to_float(interest_amount), 2)
+    normalized_type = str(payment_type or '').strip().upper()
 
     if principal == 0 and interest == 0 and total > 0:
-        normalized_type = str(payment_type or '').strip().upper()
         if normalized_type == 'PRINCIPAL':
             principal = total
         elif normalized_type == 'INTEREST':
             interest = total
-        elif normalized_type == 'BOTH':
+        elif normalized_type in {'BOTH', 'BALANCE'}:
             principal = total
         else:
             interest = total
@@ -1318,6 +1483,10 @@ def normalize_payment(record: Dict[str, Any], customer_lookup: Optional[Dict[str
             payment_type = 'PRINCIPAL'
         else:
             payment_type = 'INTEREST'
+    is_virtual = is_virtual_payment(record)
+    cash_total_amount = 0.0 if is_virtual else split['total_amount']
+    cash_principal_amount = 0.0 if is_virtual else split['principal_amount']
+    cash_interest_amount = 0.0 if is_virtual else split['interest_amount']
 
     return {
         'payment_id': str(first_present(record, ['payment_id', 'PaymentID'], '') or ''),
@@ -1330,7 +1499,12 @@ def normalize_payment(record: Dict[str, Any], customer_lookup: Optional[Dict[str
         'total_amount': split['total_amount'],
         'principal_amount': split['principal_amount'],
         'interest_amount': split['interest_amount'],
+        'cash_total_amount': round(cash_total_amount, 2),
+        'cash_principal_amount': round(cash_principal_amount, 2),
+        'cash_interest_amount': round(cash_interest_amount, 2),
         'payment_type': payment_type,
+        'is_virtual': is_virtual,
+        'linked_successor_loan_id': str(first_present(record, ['linked_successor_loan_id', 'LinkedSuccessorLoanID'], '') or ''),
         'payment_method': str(first_present(record, ['payment_method', 'PaymentMethod'], 'CASH') or 'CASH'),
         'reference_number': str(first_present(record, ['reference_number', 'ReferenceNumber'], '') or ''),
         'created_date': format_display_date(first_present(record, ['created_date', 'CreatedOn'])),
@@ -1341,7 +1515,7 @@ def normalize_payment(record: Dict[str, Any], customer_lookup: Optional[Dict[str
     }
 
 def calculate_loan_balances(loan_record: Dict[str, Any], payment_rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    effective_principal = round(to_float(loan_record.get('effective_principal_amount', loan_record.get('principal_amount'))), 2)
+    contractual_principal = round(to_float(loan_record.get('principal_amount')), 2)
     principal_paid = 0.0
     interest_paid = 0.0
 
@@ -1352,12 +1526,14 @@ def calculate_loan_balances(loan_record: Dict[str, Any], payment_rows: List[Dict
         )
 
     for payment in sorted(payment_rows, key=payment_sort_key):
-        remaining = max(0, effective_principal - principal_paid)
+        if is_virtual_payment(payment):
+            continue
+        remaining = max(0, contractual_principal - principal_paid)
         split = resolve_payment_components(payment, remaining)
         principal_paid = round(principal_paid + split['principal_amount'], 2)
         interest_paid = round(interest_paid + split['interest_amount'], 2)
 
-    outstanding = round(max(0, effective_principal - principal_paid), 2)
+    outstanding = round(max(0, contractual_principal - principal_paid), 2)
     return {
         'principal_paid': principal_paid,
         'interest_paid': interest_paid,
@@ -1370,6 +1546,7 @@ def normalize_loan(record: Dict[str, Any], customer_lookup: Optional[Dict[str, D
     customer_name = customer_lookup.get(customer_id, {}).get('name', '') if customer_lookup else ''
     principal_amount = get_raw_principal_amount(record)
     add_on_principal = get_add_on_principal_amount(record)
+    fresh_principal = get_fresh_principal_amount(record)
     effective_principal_amount = get_effective_principal_amount(record)
     pre_deducted_interest = round(to_float(first_present(record, ['pre_deducted_interest', 'PreDeductedInterest'])), 2)
     transaction_type = get_loan_type(record)
@@ -1383,16 +1560,23 @@ def normalize_loan(record: Dict[str, Any], customer_lookup: Optional[Dict[str, D
     net_disbursed_amount = to_float(first_present(record, ['net_disbursed_amount', 'NetDisbursedAmount']), 0)
     if net_disbursed_amount <= 0:
         if transaction_type == 'DEBT' and debt_interest_mode == 'upfront_deduction':
-            net_disbursed_amount = max(0, principal_amount - pre_deducted_interest)
+            net_disbursed_amount = max(0, fresh_principal - pre_deducted_interest)
         else:
-            net_disbursed_amount = principal_amount
+            net_disbursed_amount = fresh_principal
 
-    balances = calculate_loan_balances({'principal_amount': principal_amount, 'effective_principal_amount': effective_principal_amount}, payment_rows or [])
+    balances = calculate_loan_balances({'principal_amount': principal_amount}, payment_rows or [])
     start_date = first_present(record, ['start_date', 'StartDate', 'LoanDate', 'Date'])
     start_date_value = parse_date_value(start_date)
     days_active = (datetime.now().date() - start_date_value).days if start_date_value else 0
     months_active = max(0, to_int(days_active / 30))
-    accrued_interest = calculate_interest_accrued(principal_amount, to_float(first_present(record, ['interest_rate', 'InterestRate', 'Rate'])), start_date_value) if start_date_value else 0.0
+    accrued_interest = calculate_interest_accrued_for_loan(
+        {
+            **record,
+            'principal_amount': principal_amount,
+            'interest_rate': to_float(first_present(record, ['interest_rate', 'InterestRate', 'Rate']))
+        },
+        payment_rows or []
+    ) if start_date_value else 0.0
     interest_paid_total = round(balances['interest_paid'] + (pre_deducted_interest if debt_interest_mode == 'upfront_deduction' else 0), 2)
 
     return {
@@ -1400,6 +1584,7 @@ def normalize_loan(record: Dict[str, Any], customer_lookup: Optional[Dict[str, D
         'customer_id': customer_id,
         'customer_name': customer_name or customer_id,
         'principal_amount': principal_amount,
+        'fresh_principal': fresh_principal,
         'add_on_principal': add_on_principal,
         'effective_principal_amount': effective_principal_amount,
         'interest_rate': round(to_float(first_present(record, ['interest_rate', 'InterestRate', 'Rate'])), 6),
@@ -1412,6 +1597,10 @@ def normalize_loan(record: Dict[str, Any], customer_lookup: Optional[Dict[str, D
         'start_date_iso': format_iso_date(start_date),
         'tenure_months': to_int(first_present(record, ['tenure_months', 'TenureMonths']), 0) or None,
         'status': title_case_status(first_present(record, ['status', 'Status', 'LoanStatus'], 'ACTIVE')),
+        'parent_loan_id': str(first_present(record, ['parent_loan_id', 'ParentLoanID'], '') or '') or None,
+        'loan_chain_id': str(first_present(record, ['loan_chain_id', 'LoanChainID'], '') or '') or None,
+        'chain_start_date': format_display_date(first_present(record, ['chain_start_date', 'ChainStartDate'], start_date)),
+        'chain_start_date_iso': format_iso_date(first_present(record, ['chain_start_date', 'ChainStartDate'], start_date)),
         'fund_source': str(first_present(record, ['fund_source', 'FundSourceID'], '') or ''),
         'notes': str(first_present(record, ['notes', 'Notes'], '') or ''),
         'created_date': format_display_date(first_present(record, ['created_date', 'CreatedOn'])),
@@ -1445,7 +1634,14 @@ def load_normalized_customers(status: Optional[str] = None, search: Optional[str
             or search_lower in customer['name'].lower()
             or search_lower in customer['phone'].lower()
         ]
-    return sorted(customers, key=lambda customer: (customer['name'] or '').lower())
+    return sorted(
+        customers,
+        key=lambda customer: (
+            customer.get('created_date_iso') or '',
+            customer.get('customer_id') or ''
+        ),
+        reverse=True
+    )
 
 def load_normalized_payments(loan_id: Optional[str] = None, customer_id: Optional[str] = None, payment_method: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
     customers = build_customer_lookup()
@@ -1474,7 +1670,14 @@ def load_normalized_payments(loan_id: Optional[str] = None, customer_id: Optiona
             filtered.append(payment)
         payments = filtered
 
-    payments.sort(key=lambda payment: payment['payment_date_iso'] or '', reverse=True)
+    payments.sort(
+        key=lambda payment: (
+            payment.get('payment_date_iso') or '',
+            payment.get('created_date_iso') or '',
+            payment.get('payment_id') or ''
+        ),
+        reverse=True
+    )
     return payments
 
 def load_normalized_loans(customer_id: Optional[str] = None, status: Optional[str] = None, loan_type: Optional[str] = None, disbursed_from: Optional[str] = None, disbursed_to: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1511,7 +1714,14 @@ def load_normalized_loans(customer_id: Optional[str] = None, status: Optional[st
             filtered_loans.append(loan)
         normalized_loans = filtered_loans
 
-    normalized_loans.sort(key=lambda loan: loan['start_date_iso'] or '', reverse=True)
+    normalized_loans.sort(
+        key=lambda loan: (
+            loan.get('start_date_iso') or '',
+            loan.get('created_date_iso') or '',
+            loan.get('loan_id') or ''
+        ),
+        reverse=True
+    )
     return normalized_loans
 
 # Debug endpoint to inspect actual Excel structure
@@ -1677,6 +1887,317 @@ async def validate_data_integrity():
         'loan_borrower_mappings': len(loan_borrower_ids)
     }
 
+def get_outstanding_principal(loan_id: str, loans: Optional[List[Dict[str, Any]]] = None, payments: Optional[List[Dict[str, Any]]] = None) -> float:
+    loan_rows = loans if loans is not None else load_normalized_loans()
+    payment_rows = payments if payments is not None else load_normalized_payments(loan_id=loan_id)
+    loan = next((item for item in loan_rows if item.get('loan_id') == loan_id), None)
+    if not loan:
+        return 0.0
+    real_principal_paid = round(
+        sum(to_float(payment.get('cash_principal_amount', payment.get('principal_amount'))) for payment in payment_rows if payment.get('loan_id') == loan_id),
+        2
+    )
+    return round(max(0, to_float(loan.get('principal_amount')) - real_principal_paid), 2)
+
+def get_total_collected(customer_id: str, payments: Optional[List[Dict[str, Any]]] = None) -> float:
+    payment_rows = payments if payments is not None else load_normalized_payments(customer_id=customer_id)
+    return round(
+        sum(to_float(payment.get('cash_total_amount', payment.get('total_amount'))) for payment in payment_rows if payment.get('customer_id') == customer_id),
+        2
+    )
+
+def normalize_status_key(value: Any) -> str:
+    return str(value or '').strip().upper()
+
+def resolve_loan_amounts(loan: Loan) -> Dict[str, float]:
+    add_on_principal = round(max(0, to_float(loan.add_on_principal)), 2)
+    explicit_new_disbursed = loan.new_disbursed_amount
+
+    if explicit_new_disbursed not in (None, ''):
+        fresh_principal = round(max(0, to_float(explicit_new_disbursed)), 2)
+        principal_amount = round(fresh_principal + add_on_principal, 2)
+    else:
+        principal_amount = round(to_float(loan.principal_amount), 2)
+        fresh_principal = round(max(0, principal_amount - add_on_principal), 2)
+
+    return {
+        'principal_amount': principal_amount,
+        'add_on_principal': add_on_principal,
+        'fresh_principal': fresh_principal
+    }
+
+def get_rollover_candidate_loans(
+    customer_id: str,
+    loan_rows: Optional[List[Dict[str, Any]]] = None,
+    exclude_loan_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    rows = loan_rows if loan_rows is not None else load_normalized_loans(customer_id=customer_id)
+    return [
+        loan for loan in rows
+        if loan.get('customer_id') == customer_id
+        and loan.get('loan_id') != exclude_loan_id
+    ]
+
+def ensure_chain_assignment(parent_loan: Dict[str, Any], successor_start_date: date) -> Dict[str, Any]:
+    chain_id = str(parent_loan.get('loan_chain_id') or '').strip()
+    chain_start_date = parse_date_value(
+        parent_loan.get('chain_start_date_iso')
+        or parent_loan.get('chain_start_date')
+        or parent_loan.get('start_date_iso')
+        or parent_loan.get('start_date')
+    ) or successor_start_date
+
+    parent_updates = {}
+    if not chain_id:
+        chain_id = str(uuid4())
+        parent_updates['loan_chain_id'] = chain_id
+    if not parent_loan.get('chain_start_date_iso'):
+        parent_updates['chain_start_date'] = chain_start_date
+
+    if parent_updates:
+        db.update_row('Loans', 'loan_id', parent_loan.get('loan_id'), parent_updates)
+
+    return {
+        'loan_chain_id': chain_id,
+        'chain_start_date': chain_start_date
+    }
+
+def validate_rollover_request(
+    customer_id: str,
+    source_loan_id: str,
+    successor_loan_id: str,
+    add_on_principal: float,
+    successor_start_date: date,
+    loan_rows: Optional[List[Dict[str, Any]]] = None,
+    payment_rows: Optional[List[Dict[str, Any]]] = None,
+    exclude_loan_id: Optional[str] = None,
+    allow_existing_completed_source_id: Optional[str] = None
+) -> Dict[str, Any]:
+    if add_on_principal <= 0:
+        raise HTTPException(status_code=400, detail="Add-on principal must be greater than 0 to create a rollover")
+
+    source_loan_id = str(source_loan_id or '').strip()
+    if not source_loan_id:
+        raise HTTPException(status_code=400, detail="Select the active loan that is being rolled over")
+    if exclude_loan_id and source_loan_id == exclude_loan_id:
+        raise HTTPException(status_code=400, detail="A loan cannot roll over into itself")
+
+    candidate_loans = get_rollover_candidate_loans(customer_id, loan_rows=loan_rows, exclude_loan_id=exclude_loan_id)
+    source_loan = next((loan for loan in candidate_loans if loan.get('loan_id') == source_loan_id), None)
+    if not source_loan:
+        raise HTTPException(status_code=404, detail="Selected rollover source loan was not found for this customer")
+
+    source_status = normalize_status_key(source_loan.get('status'))
+    allow_completed = allow_existing_completed_source_id and source_loan_id == allow_existing_completed_source_id
+    if source_status != 'ACTIVE' and not allow_completed:
+        raise HTTPException(status_code=400, detail="Only ACTIVE loans can be selected as a new rollover source")
+
+    source_payments = [
+        payment for payment in (payment_rows if payment_rows is not None else load_normalized_payments(customer_id=customer_id))
+        if payment.get('loan_id') == source_loan_id
+    ]
+    other_successors = [
+        payment for payment in source_payments
+        if payment.get('is_virtual')
+        and str(payment.get('linked_successor_loan_id') or '').strip()
+        and str(payment.get('linked_successor_loan_id') or '').strip() != successor_loan_id
+    ]
+    if other_successors:
+        linked_loan_id = other_successors[0].get('linked_successor_loan_id')
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loan {source_loan_id} is already rolled over into {linked_loan_id}. Create a new rollover from the current active loan instead."
+        )
+
+    outstanding_principal = round(
+        get_outstanding_principal(source_loan_id, loans=loan_rows, payments=payment_rows),
+        2
+    )
+    if outstanding_principal <= 0:
+        raise HTTPException(status_code=400, detail="Selected rollover source loan has no outstanding principal left")
+    if add_on_principal > outstanding_principal:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Add-on principal {add_on_principal:.2f} exceeds source loan outstanding {outstanding_principal:.2f}"
+        )
+
+    chain_assignment = ensure_chain_assignment(source_loan, successor_start_date)
+    return {
+        'source_loan': source_loan,
+        'outstanding_principal': outstanding_principal,
+        'loan_chain_id': chain_assignment['loan_chain_id'],
+        'chain_start_date': chain_assignment['chain_start_date']
+    }
+
+def upsert_virtual_rollover_payment(
+    parent_loan_id: str,
+    successor_loan_id: str,
+    customer_id: str,
+    amount: float,
+    payment_date: date
+) -> str:
+    parent_payments = load_normalized_payments(loan_id=parent_loan_id)
+    existing_payment = next(
+        (
+            payment for payment in parent_payments
+            if payment.get('is_virtual')
+            and str(payment.get('linked_successor_loan_id') or '').strip() == successor_loan_id
+        ),
+        None
+    )
+
+    note = f"Virtual rollover to successor loan {successor_loan_id}"
+    payload = {
+        'loan_id': parent_loan_id,
+        'customer_id': customer_id,
+        'payment_date': payment_date,
+        'amount': amount,
+        'payment_type': 'BALANCE',
+        'payment_method': 'BALANCE',
+        'reference_number': '',
+        'notes': note,
+        'principal_amount': amount,
+        'interest_amount': 0.0,
+        'help_category': 'None',
+        'is_virtual': True,
+        'linked_successor_loan_id': successor_loan_id
+    }
+
+    if existing_payment:
+        payment_id = existing_payment['payment_id']
+        db.update_row('Payments', 'payment_id', payment_id, payload)
+        db.log_audit('PAYMENT', payment_id, 'UPDATE', existing_payment, payload)
+        return payment_id
+
+    payment_id = db.get_next_id('payment')
+    db.add_dict_row('Payments', {
+        'payment_id': payment_id,
+        'created_date': datetime.now(),
+        'created_by': 'SYSTEM',
+        **payload
+    })
+    db.log_audit('PAYMENT', payment_id, 'CREATE', None, {
+        'loan_id': parent_loan_id,
+        'amount': amount,
+        'principal_amount': amount,
+        'interest_amount': 0.0,
+        'type': 'BALANCE',
+        'help_category': 'None',
+        'is_virtual': True,
+        'linked_successor_loan_id': successor_loan_id
+    })
+    return payment_id
+
+def close_parent_loan_for_rollover(
+    parent_loan: Dict[str, Any],
+    successor_loan_id: str,
+    amount: float,
+    chain_id: str,
+    chain_start_date: date
+) -> None:
+    current_status = normalize_status_key(parent_loan.get('status'))
+    updates = {
+        'status': 'COMPLETED',
+        'loan_chain_id': chain_id,
+        'chain_start_date': chain_start_date,
+        'closed_date': parse_date_value(parent_loan.get('closed_date_iso') or parent_loan.get('closed_date')) or datetime.now()
+    }
+    db.update_row('Loans', 'loan_id', parent_loan.get('loan_id'), updates)
+    db.log_audit(
+        'LOAN',
+        parent_loan.get('loan_id'),
+        'ROLLOVER_CLOSE',
+        {'status': current_status or 'UNKNOWN'},
+        {
+            'status': 'COMPLETED',
+            'successor_loan_id': successor_loan_id,
+            'virtual_rollover_amount': amount,
+            'loan_chain_id': chain_id
+        }
+    )
+
+def build_loan_chain_groups(loans: List[Dict[str, Any]], payments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    payments_by_loan: Dict[str, List[Dict[str, Any]]] = {}
+    for payment in payments:
+        payments_by_loan.setdefault(payment.get('loan_id', ''), []).append(payment)
+
+    chains: Dict[str, Dict[str, Any]] = {}
+    for loan in loans:
+        chain_id = str(loan.get('loan_chain_id') or '').strip() or f"UNASSIGNED-{loan.get('loan_id')}"
+        bucket = chains.setdefault(
+            chain_id,
+            {
+                'loan_chain_id': None if chain_id.startswith('UNASSIGNED-') else chain_id,
+                'chain_start_date': loan.get('chain_start_date') or loan.get('start_date'),
+                'chain_start_date_iso': loan.get('chain_start_date_iso') or loan.get('start_date_iso'),
+                'is_active': False,
+                'loans': []
+            }
+        )
+        virtual_rollovers = sorted(
+            [payment for payment in payments_by_loan.get(loan.get('loan_id', ''), []) if payment.get('is_virtual')],
+            key=lambda payment: (
+                payment.get('payment_date_iso') or '',
+                payment.get('payment_id') or ''
+            )
+        )
+        bucket['is_active'] = bucket['is_active'] or str(loan.get('status') or '').upper() == 'ACTIVE'
+        bucket['loans'].append({**loan, 'virtual_rollovers': virtual_rollovers})
+
+    for chain in chains.values():
+        chain['loans'].sort(
+            key=lambda loan: (
+                loan.get('start_date_iso') or '',
+                loan.get('created_date_iso') or '',
+                loan.get('loan_id') or ''
+            )
+        )
+
+    return sorted(
+        chains.values(),
+        key=lambda chain: (
+            chain.get('chain_start_date_iso') or '',
+            chain.get('loan_chain_id') or ''
+        )
+    )
+
+def get_borrower_risk_profile_data(
+    customer_id: str,
+    loans: Optional[List[Dict[str, Any]]] = None,
+    payments: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    loan_rows = loans if loans is not None else load_normalized_loans(customer_id=customer_id)
+    payment_rows = payments if payments is not None else load_normalized_payments(customer_id=customer_id)
+    chain_start_dates = [parse_date_value(loan.get('chain_start_date_iso') or loan.get('chain_start_date')) for loan in loan_rows]
+    valid_chain_start_dates = [value for value in chain_start_dates if value]
+    earliest_chain_start = min(valid_chain_start_dates) if valid_chain_start_dates else None
+    active_chain_ids = sorted(
+        {
+            str(loan.get('loan_chain_id')).strip()
+            for loan in loan_rows
+            if loan.get('loan_chain_id') and str(loan.get('status') or '').upper() == 'ACTIVE'
+        }
+    )
+    return {
+        'total_fresh_disbursed': round(sum(to_float(loan.get('fresh_principal')) for loan in loan_rows), 2),
+        'total_real_repaid': round(sum(to_float(payment.get('cash_principal_amount', payment.get('principal_amount'))) for payment in payment_rows), 2),
+        'effective_debt_age_days': (datetime.now().date() - earliest_chain_start).days if earliest_chain_start else 0,
+        'rollover_count': len([loan for loan in loan_rows if loan.get('parent_loan_id')]),
+        'active_chain_ids': active_chain_ids
+    }
+
+def getOutstandingPrincipal(loanId: str) -> float:
+    return get_outstanding_principal(loanId)
+
+def getTotalCollected(borrowerId: str) -> float:
+    return get_total_collected(borrowerId)
+
+def getLoanSummary(loanId: str) -> Optional[LoanSummary]:
+    return get_loan_summary_data(loanId)
+
+def getBorrowerRiskProfile(borrowerId: str) -> Dict[str, Any]:
+    return get_borrower_risk_profile_data(borrowerId)
+
 
 def get_loan_summary_data(loan_id: str) -> Optional[LoanSummary]:
     """Get comprehensive loan summary with calculations"""
@@ -1691,6 +2212,7 @@ def get_loan_summary_data(loan_id: str) -> Optional[LoanSummary]:
         loan_id=loan['loan_id'],
         customer_name=loan['customer_name'],
         principal_amount=loan['principal_amount'],
+        fresh_principal=loan.get('fresh_principal', get_fresh_principal_amount(loan)),
         add_on_principal=loan.get('add_on_principal', 0.0),
         effective_principal_amount=loan.get('effective_principal_amount', loan['principal_amount']),
         net_disbursed_amount=loan['net_disbursed_amount'],
@@ -1698,11 +2220,15 @@ def get_loan_summary_data(loan_id: str) -> Optional[LoanSummary]:
         total_paid=loan['total_paid'],
         principal_paid=loan['principal_paid'],
         interest_paid=loan['interest_paid'],
-        outstanding_balance=loan['outstanding_balance'],
+        outstanding_balance=get_outstanding_principal(loan_id, loans=loans, payments=payments),
         interest_rate=loan['interest_rate'],
         transaction_type=loan['transaction_type'],
         debt_interest_mode=loan['debt_interest_mode'],
         status=loan['status'],
+        parent_loan_id=loan.get('parent_loan_id'),
+        loan_chain_id=loan.get('loan_chain_id'),
+        chain_start_date=loan.get('chain_start_date'),
+        chain_start_date_iso=loan.get('chain_start_date_iso'),
         start_date=loan['start_date'],
         start_date_iso=loan['start_date_iso'],
         months_active=loan['months_active'],
@@ -1720,7 +2246,7 @@ def get_loan_summary_data(loan_id: str) -> Optional[LoanSummary]:
 @app.get("/customers", response_model=List[Dict])
 async def get_customers(status: Optional[str] = None, search: Optional[str] = None):
     """Get all customers with optional filtering"""
-    return load_normalized_customers(status=status, search=search)
+    return [attach_customer_assets(customer) for customer in load_normalized_customers(status=status, search=search)]
 
 @app.get("/customers/{customer_id}")
 async def get_customer(customer_id: str):
@@ -1731,7 +2257,7 @@ async def get_customer(customer_id: str):
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    return customer
+    return attach_customer_assets(customer)
 
 @app.get("/customers/{customer_id}/profile")
 async def get_customer_profile(customer_id: str):
@@ -1740,12 +2266,14 @@ async def get_customer_profile(customer_id: str):
     loans = load_normalized_loans(customer_id=customer_id)
     payments = load_normalized_payments(customer_id=customer_id)
     help_records = [record for record in (normalize_help(row) for row in db.get_all_rows('Help')) if record['customer_id'] == customer_id]
+    risk_profile = get_borrower_risk_profile_data(customer_id, loans=loans, payments=payments)
+    loan_chains = build_loan_chain_groups(loans, payments)
 
     totals = {
-        'total_disbursed': round(sum(to_float(loan.get('effective_principal_amount', loan.get('principal_amount'))) for loan in loans), 2),
-        'total_collected': round(sum(to_float(loan.get('principal_paid')) for loan in loans), 2),
-        'interest_collected': round(sum(to_float(loan.get('interest_paid')) for loan in loans), 2),
-        'outstanding_balance': round(sum(to_float(loan.get('outstanding_balance')) for loan in loans), 2),
+        'total_disbursed': round(sum(get_reporting_disbursed_amount(loan) for loan in loans), 2),
+        'total_collected': get_total_collected(customer_id, payments=payments),
+        'interest_collected': round(sum(to_float(payment.get('cash_interest_amount', payment.get('interest_amount'))) for payment in payments), 2),
+        'outstanding_balance': round(sum(get_outstanding_principal(loan.get('loan_id', ''), loans=loans, payments=payments) for loan in loans), 2),
         'active_loans': len([loan for loan in loans if str(loan.get('status', '')).upper() == 'ACTIVE'])
     }
 
@@ -1757,9 +2285,14 @@ async def get_customer_profile(customer_id: str):
                 'date': payment['payment_date'],
                 'date_iso': payment['payment_date_iso'],
                 'amount': payment['total_amount'],
-                'principal_amount': payment['principal_amount'],
-                'interest_amount': payment['interest_amount'],
-                'status': payment['payment_method'],
+                'cash_amount': payment.get('cash_total_amount', payment['total_amount']),
+                'principal_amount': payment.get('cash_principal_amount', payment['principal_amount']),
+                'interest_amount': payment.get('cash_interest_amount', payment['interest_amount']),
+                'ledger_principal_amount': payment['principal_amount'],
+                'ledger_interest_amount': payment['interest_amount'],
+                'status': 'Virtual rollover' if payment.get('is_virtual') else payment['payment_method'],
+                'is_virtual': payment.get('is_virtual', False),
+                'linked_successor_loan_id': payment.get('linked_successor_loan_id'),
                 'notes': payment['notes']
             }
             for payment in payments
@@ -1782,10 +2315,12 @@ async def get_customer_profile(customer_id: str):
     )
 
     return {
-        'customer': customer,
+        'customer': attach_customer_assets(customer),
         'totals': totals,
         'loans': loans,
         'payments': payments,
+        'loan_chains': loan_chains,
+        'risk_profile': risk_profile,
         'help_records': help_records,
         'transactions': transactions
     }
@@ -1845,6 +2380,160 @@ async def update_customer(customer_id: str, customer: Customer):
     
     return {"message": "Customer updated successfully"}
 
+@app.delete("/customers/{customer_id}")
+async def delete_customer(customer_id: str):
+    customer = await get_customer(customer_id)
+    linked_loans = [loan for loan in load_normalized_loans() if loan.get('customer_id') == customer_id]
+    linked_payments = [payment for payment in load_normalized_payments() if payment.get('customer_id') == customer_id]
+    linked_help = [record for record in (normalize_help(row) for row in db.get_all_rows('Help')) if record.get('customer_id') == customer_id]
+
+    if linked_loans or linked_payments or linked_help:
+        blockers = []
+        if linked_loans:
+            sample_loans = ", ".join(str(loan.get('loan_id') or '') for loan in linked_loans[:3] if loan.get('loan_id'))
+            blockers.append(f"{len(linked_loans)} linked loan(s)" + (f" ({sample_loans})" if sample_loans else ""))
+        if linked_payments:
+            sample_payments = ", ".join(str(payment.get('payment_id') or '') for payment in linked_payments[:3] if payment.get('payment_id'))
+            blockers.append(f"{len(linked_payments)} linked payment(s)" + (f" ({sample_payments})" if sample_payments else ""))
+        if linked_help:
+            sample_help = ", ".join(str(record.get('help_id') or '') for record in linked_help[:3] if record.get('help_id'))
+            blockers.append(f"{len(linked_help)} linked help record(s)" + (f" ({sample_help})" if sample_help else ""))
+        raise HTTPException(
+            status_code=400,
+            detail="Customer cannot be deleted because " + "; ".join(blockers) + ". Remove those linked records first."
+        )
+
+    db.delete_row('Customers', 'customer_id', customer_id)
+
+    asset_dir = get_customer_asset_dir(customer_id)
+    if os.path.exists(asset_dir):
+        shutil.rmtree(asset_dir, ignore_errors=True)
+
+    db.log_audit('CUSTOMER', customer_id, 'DELETE', customer, None)
+    return {"message": "Customer deleted successfully"}
+
+@app.get("/customers/{customer_id}/assets")
+async def get_customer_assets(customer_id: str):
+    await get_customer(customer_id)
+    metadata = load_customer_asset_metadata(customer_id)
+    return {
+        'photo': build_customer_asset_response(customer_id, metadata.get('photo')),
+        'documents': [
+            build_customer_asset_response(customer_id, asset)
+            for asset in metadata.get('documents', [])
+            if asset
+        ]
+    }
+
+@app.post("/customers/{customer_id}/assets")
+async def upload_customer_asset(
+    customer_id: str,
+    kind: str = Form(...),
+    upload: UploadFile = File(...)
+):
+    await get_customer(customer_id)
+    normalized_kind = str(kind or '').strip().lower()
+    if normalized_kind not in {'photo', 'document'}:
+        raise HTTPException(status_code=400, detail="Invalid asset kind")
+
+    original_name = os.path.basename(upload.filename or '')
+    ext = os.path.splitext(original_name)[1].lower()
+    allowed_extensions = IMAGE_EXTENSIONS if normalized_kind == 'photo' else DOCUMENT_EXTENSIONS
+    if ext not in allowed_extensions:
+        allowed_label = 'JPG/PNG' if normalized_kind == 'photo' else 'PDF, DOC, DOCX, JPG, PNG'
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {allowed_label}")
+
+    content = await upload.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(content) > MAX_CUSTOMER_ASSET_BYTES:
+        raise HTTPException(status_code=400, detail="File is too large. Maximum size is 10 MB")
+
+    asset_dir = get_customer_asset_dir(customer_id)
+    ensure_directory(asset_dir)
+    asset_id = uuid4().hex
+    stored_name = f"{asset_id}{ext}"
+    stored_path = os.path.join(asset_dir, stored_name)
+    with open(stored_path, 'wb') as handle:
+        handle.write(content)
+
+    metadata = load_customer_asset_metadata(customer_id)
+    asset_entry = {
+        'asset_id': asset_id,
+        'kind': normalized_kind,
+        'filename': original_name or stored_name,
+        'stored_name': stored_name,
+        'content_type': upload.content_type or 'application/octet-stream',
+        'size_bytes': len(content),
+        'uploaded_at': datetime.now().isoformat()
+    }
+
+    if normalized_kind == 'photo':
+        previous_photo = metadata.get('photo')
+        if previous_photo:
+            previous_path = os.path.join(asset_dir, previous_photo.get('stored_name', ''))
+            if os.path.exists(previous_path):
+                os.remove(previous_path)
+        metadata['photo'] = asset_entry
+    else:
+        documents = metadata.get('documents', [])
+        documents.append(asset_entry)
+        metadata['documents'] = documents
+
+    save_customer_asset_metadata(customer_id, metadata)
+    db.log_audit('CUSTOMER', customer_id, 'UPLOAD_ASSET', None, {'asset_id': asset_id, 'kind': normalized_kind, 'filename': asset_entry['filename']})
+    return build_customer_asset_response(customer_id, asset_entry)
+
+@app.get("/customers/{customer_id}/assets/{asset_id}")
+async def download_customer_asset(customer_id: str, asset_id: str):
+    await get_customer(customer_id)
+    metadata = load_customer_asset_metadata(customer_id)
+    candidates = [metadata.get('photo')] + metadata.get('documents', [])
+    asset = next((item for item in candidates if item and item.get('asset_id') == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    asset_path = os.path.join(get_customer_asset_dir(customer_id), asset.get('stored_name', ''))
+    if not os.path.exists(asset_path):
+        raise HTTPException(status_code=404, detail="Stored asset file not found")
+
+    return FileResponse(asset_path, media_type=asset.get('content_type') or 'application/octet-stream', filename=asset.get('filename') or asset.get('stored_name'))
+
+@app.delete("/customers/{customer_id}/assets/{asset_id}")
+async def delete_customer_asset(customer_id: str, asset_id: str):
+    await get_customer(customer_id)
+    metadata = load_customer_asset_metadata(customer_id)
+    photo = metadata.get('photo')
+    documents = metadata.get('documents', [])
+    removed = None
+
+    if photo and photo.get('asset_id') == asset_id:
+        removed = photo
+        metadata['photo'] = None
+    else:
+        kept_documents = [item for item in documents if item.get('asset_id') != asset_id]
+        if len(kept_documents) != len(documents):
+            removed = next((item for item in documents if item.get('asset_id') == asset_id), None)
+            metadata['documents'] = kept_documents
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    asset_path = os.path.join(get_customer_asset_dir(customer_id), removed.get('stored_name', ''))
+    if os.path.exists(asset_path):
+        os.remove(asset_path)
+    save_customer_asset_metadata(customer_id, metadata)
+    db.log_audit('CUSTOMER', customer_id, 'DELETE_ASSET', None, {'asset_id': asset_id, 'filename': removed.get('filename', '')})
+    return {"message": "Asset deleted successfully"}
+
+@app.get("/api/admin/trigger-snapshot")
+async def trigger_snapshot(x_admin_token: Optional[str] = Header(default=None)):
+    ensure_snapshot_admin(x_admin_token)
+    result = execute_snapshot_job('manual')
+    if result.get('status') != 'success':
+        raise HTTPException(status_code=500, detail=result.get('error', 'Snapshot job failed'))
+    return result
+
 # ========== LOAN ENDPOINTS ==========
 
 @app.get("/loans")
@@ -1877,18 +2566,20 @@ async def get_loan_summary(loan_id: str):
 @app.post("/loans")
 async def create_loan(loan: Loan):
     """Create new loan"""
-    if loan.principal_amount <= 0:
-        raise HTTPException(status_code=400, detail="Principal amount must be greater than 0")
+    amounts = resolve_loan_amounts(loan)
+    principal_amount = amounts['principal_amount']
+    add_on_principal = amounts['add_on_principal']
+    fresh_principal = amounts['fresh_principal']
+
+    if principal_amount <= 0:
+        raise HTTPException(status_code=400, detail="Total principal must be greater than 0")
     if loan.interest_rate < 0:
         raise HTTPException(status_code=400, detail="Interest rate cannot be negative")
     loan_id = db.get_next_id('loan')
     normalized_type = str(loan.transaction_type or 'KULU').strip().upper()
     debt_interest_mode = resolve_debt_interest_mode({'debt_interest_mode': loan.debt_interest_mode})
-    add_on_principal = round(max(0, to_float(loan.add_on_principal)), 2)
     pre_deducted_interest = round(to_float(loan.pre_deducted_interest), 2)
-
-    if add_on_principal > loan.principal_amount:
-        raise HTTPException(status_code=400, detail="Add-on principal cannot exceed principal amount")
+    rollover_source_loan_id = str(loan.rollover_source_loan_id or loan.parent_loan_id or '').strip()
 
     # BUSINESS RULE: KULU loans always disburse the full principal and never deduct interest upfront.
     if normalized_type != 'DEBT':
@@ -1896,18 +2587,45 @@ async def create_loan(loan: Loan):
         pre_deducted_interest = 0.0
 
     if debt_interest_mode == 'upfront_deduction':
-        if pre_deducted_interest < 0 or pre_deducted_interest > loan.principal_amount:
-            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and principal amount")
-        net_disbursed_amount = round(loan.principal_amount - pre_deducted_interest, 2)
+        if pre_deducted_interest < 0 or pre_deducted_interest > fresh_principal:
+            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and fresh principal")
+        net_disbursed_amount = round(fresh_principal - pre_deducted_interest, 2)
     else:
         pre_deducted_interest = 0.0
-        net_disbursed_amount = round(loan.principal_amount, 2)
+        net_disbursed_amount = round(fresh_principal, 2)
+
+    current_loans = load_normalized_loans()
+    current_payments = load_normalized_payments()
+    rollover_context = None
+    if add_on_principal > 0:
+        rollover_context = validate_rollover_request(
+            customer_id=loan.customer_id,
+            source_loan_id=rollover_source_loan_id,
+            successor_loan_id=loan_id,
+            add_on_principal=add_on_principal,
+            successor_start_date=loan.start_date,
+            loan_rows=current_loans,
+            payment_rows=current_payments
+        )
+    elif rollover_source_loan_id:
+        raise HTTPException(status_code=400, detail="Remove the rollover source loan or enter an add-on principal amount")
+
+    loan_chain_id = str(loan.loan_chain_id or '').strip()
+    if rollover_context:
+        loan_chain_id = loan_chain_id or rollover_context['loan_chain_id']
+        chain_start_date = loan.chain_start_date or rollover_context['chain_start_date']
+        parent_loan_id = rollover_context['source_loan']['loan_id']
+    else:
+        loan_chain_id = loan_chain_id or str(uuid4())
+        chain_start_date = loan.chain_start_date or loan.start_date
+        parent_loan_id = ''
     
     payload = {
         'loan_id': loan_id,
         'customer_id': loan.customer_id,
-        'principal_amount': loan.principal_amount,
+        'principal_amount': principal_amount,
         'add_on_principal': add_on_principal,
+        'fresh_principal': fresh_principal,
         'interest_rate': loan.interest_rate,
         'loan_type': loan.loan_type,
         'start_date': loan.start_date,
@@ -1925,66 +2643,121 @@ async def create_loan(loan: Loan):
         'waived_interest_amount': 0,
         'waiver_reason': '',
         'waiver_date': None,
-        'LoanID': loan_id,
-        'BorrowerID': loan.customer_id,
-        'TYPE': normalized_type,
-        'PrincipalAmount': loan.principal_amount,
-        'AddOnPrincipal': add_on_principal,
-        'InterestRate': loan.interest_rate,
-        'StartDate': loan.start_date,
-        'FundSourceID': loan.fund_source or '',
-        'LoanStatus': loan.status,
-        'CreatedOn': datetime.now()
+        'parent_loan_id': parent_loan_id,
+        'loan_chain_id': loan_chain_id,
+        'chain_start_date': chain_start_date
     }
     db.add_dict_row('Loans', payload)
+    if rollover_context:
+        upsert_virtual_rollover_payment(
+            parent_loan_id=parent_loan_id,
+            successor_loan_id=loan_id,
+            customer_id=loan.customer_id,
+            amount=add_on_principal,
+            payment_date=loan.start_date
+        )
+        close_parent_loan_for_rollover(
+            parent_loan=rollover_context['source_loan'],
+            successor_loan_id=loan_id,
+            amount=add_on_principal,
+            chain_id=loan_chain_id,
+            chain_start_date=chain_start_date
+        )
     db.log_audit('LOAN', loan_id, 'CREATE', None, {
         'customer_id': loan.customer_id,
-        'principal': loan.principal_amount,
+        'principal': principal_amount,
+        'fresh_principal': fresh_principal,
         'add_on_principal': add_on_principal,
         'transaction_type': normalized_type,
         'debt_interest_mode': debt_interest_mode,
         'pre_deducted_interest': pre_deducted_interest,
-        'net_disbursed_amount': net_disbursed_amount
+        'net_disbursed_amount': net_disbursed_amount,
+        'rollover_source_loan_id': parent_loan_id or ''
     })
-    
-    return {"loan_id": loan_id, "message": "Loan created successfully"}
+
+    created_loan = normalize_loan(
+        payload,
+        customer_lookup=build_customer_lookup(),
+        payment_rows=[]
+    )
+    return {**created_loan, "message": "Loan created successfully"}
 
 @app.put("/loans/{loan_id}")
 async def update_loan(loan_id: str, loan: Loan):
     """Update existing loan"""
-    if loan.principal_amount <= 0:
-        raise HTTPException(status_code=400, detail="Principal amount must be greater than 0")
+    current_loans = load_normalized_loans()
+    current_payments = load_normalized_payments()
+    current_loan = next((item for item in current_loans if item.get('loan_id') == loan_id), None)
+    if not current_loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    amounts = resolve_loan_amounts(loan)
+    principal_amount = amounts['principal_amount']
+    add_on_principal = amounts['add_on_principal']
+    fresh_principal = amounts['fresh_principal']
+
+    if principal_amount <= 0:
+        raise HTTPException(status_code=400, detail="Total principal must be greater than 0")
     if loan.interest_rate < 0:
         raise HTTPException(status_code=400, detail="Interest rate cannot be negative")
     normalized_type = str(loan.transaction_type or 'KULU').strip().upper()
     debt_interest_mode = resolve_debt_interest_mode({'debt_interest_mode': loan.debt_interest_mode})
-    add_on_principal = round(max(0, to_float(loan.add_on_principal)), 2)
     pre_deducted_interest = round(to_float(loan.pre_deducted_interest), 2)
-
-    if add_on_principal > loan.principal_amount:
-        raise HTTPException(status_code=400, detail="Add-on principal cannot exceed principal amount")
+    existing_parent_loan_id = str(current_loan.get('parent_loan_id') or '').strip()
+    rollover_source_loan_id = str(loan.rollover_source_loan_id or loan.parent_loan_id or existing_parent_loan_id).strip()
 
     # BUSINESS RULE: KULU loans can only use subsequent collection; DEBT optionally supports upfront deduction.
     if normalized_type != 'DEBT':
         debt_interest_mode = 'subsequent_collection'
         pre_deducted_interest = 0.0
     elif debt_interest_mode == 'upfront_deduction':
-        if pre_deducted_interest < 0 or pre_deducted_interest > loan.principal_amount:
-            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and principal amount")
+        if pre_deducted_interest < 0 or pre_deducted_interest > fresh_principal:
+            raise HTTPException(status_code=400, detail="Pre-deducted interest must be between 0 and fresh principal")
     else:
         pre_deducted_interest = 0.0
 
     net_disbursed_amount = round(
-        loan.principal_amount - pre_deducted_interest
+        fresh_principal - pre_deducted_interest
         if debt_interest_mode == 'upfront_deduction'
-        else loan.principal_amount,
+        else fresh_principal,
         2
     )
 
+    if existing_parent_loan_id and add_on_principal <= 0:
+        raise HTTPException(status_code=400, detail="This loan is already linked to a rollover source. Keep add-on principal above zero or contact admin to unlink it safely.")
+    if existing_parent_loan_id and rollover_source_loan_id and rollover_source_loan_id != existing_parent_loan_id:
+        raise HTTPException(status_code=400, detail="Changing the rollover source loan is blocked after linkage. Keep the existing source loan or create a corrected successor loan.")
+
+    rollover_context = None
+    if add_on_principal > 0:
+        rollover_context = validate_rollover_request(
+            customer_id=loan.customer_id,
+            source_loan_id=rollover_source_loan_id,
+            successor_loan_id=loan_id,
+            add_on_principal=add_on_principal,
+            successor_start_date=loan.start_date,
+            loan_rows=current_loans,
+            payment_rows=current_payments,
+            exclude_loan_id=loan_id,
+            allow_existing_completed_source_id=existing_parent_loan_id or None
+        )
+    elif rollover_source_loan_id:
+        raise HTTPException(status_code=400, detail="Remove the rollover source loan or enter an add-on principal amount")
+
+    if rollover_context:
+        parent_loan_id = rollover_context['source_loan']['loan_id']
+        loan_chain_id = str(loan.loan_chain_id or current_loan.get('loan_chain_id') or rollover_context['loan_chain_id']).strip()
+        chain_start_date = loan.chain_start_date or parse_date_value(current_loan.get('chain_start_date_iso') or current_loan.get('chain_start_date')) or rollover_context['chain_start_date']
+    else:
+        parent_loan_id = existing_parent_loan_id
+        loan_chain_id = str(loan.loan_chain_id or current_loan.get('loan_chain_id') or str(uuid4())).strip()
+        chain_start_date = loan.chain_start_date or parse_date_value(current_loan.get('chain_start_date_iso') or current_loan.get('chain_start_date')) or loan.start_date
+
     updates = {
         'customer_id': loan.customer_id,
-        'principal_amount': loan.principal_amount,
+        'principal_amount': principal_amount,
         'add_on_principal': add_on_principal,
+        'fresh_principal': fresh_principal,
         'interest_rate': loan.interest_rate,
         'loan_type': loan.loan_type,
         'transaction_type': normalized_type,
@@ -1996,27 +2769,68 @@ async def update_loan(loan_id: str, loan: Loan):
         'pre_deducted_interest': pre_deducted_interest,
         'net_disbursed_amount': net_disbursed_amount,
         'notes': loan.notes or '',
-        'BorrowerID': loan.customer_id,
-        'TYPE': normalized_type,
-        'PrincipalAmount': loan.principal_amount,
-        'AddOnPrincipal': add_on_principal,
-        'InterestRate': loan.interest_rate,
-        'StartDate': loan.start_date,
-        'FundSourceID': loan.fund_source or '',
-        'LoanStatus': loan.status
+        'parent_loan_id': parent_loan_id,
+        'loan_chain_id': loan_chain_id,
+        'chain_start_date': chain_start_date
     }
-    
-    # Get current loan status for comparison
-    current_loan_data = await get_loan_summary(loan_id) # Use get_loan_summary to fetch current data
-    current_status = current_loan_data.status if current_loan_data else None
 
-    if loan.status == 'COMPLETED' and str(current_status).upper() != 'COMPLETED':
+    # Get current loan status for comparison (use normalized loader, not the route handler)
+    current_status = current_loan.get('status') if current_loan else None
+
+    if loan.status == 'COMPLETED' and str(current_status or '').upper() != 'COMPLETED':
         updates['closed_date'] = datetime.now()
     
     db.update_row('Loans', 'loan_id', loan_id, updates)
+    if rollover_context:
+        upsert_virtual_rollover_payment(
+            parent_loan_id=parent_loan_id,
+            successor_loan_id=loan_id,
+            customer_id=loan.customer_id,
+            amount=add_on_principal,
+            payment_date=loan.start_date
+        )
+        close_parent_loan_for_rollover(
+            parent_loan=rollover_context['source_loan'],
+            successor_loan_id=loan_id,
+            amount=add_on_principal,
+            chain_id=loan_chain_id,
+            chain_start_date=chain_start_date
+        )
     db.log_audit('LOAN', loan_id, 'UPDATE', None, updates)
     
     return {"message": "Loan updated successfully"}
+
+@app.delete("/loans/{loan_id}")
+async def delete_loan(loan_id: str):
+    all_loans = load_normalized_loans()
+    existing_loan = next((item for item in all_loans if item.get('loan_id') == loan_id), None)
+    if not existing_loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    linked_payments = [payment for payment in load_normalized_payments() if payment.get('loan_id') == loan_id]
+    child_loans = [loan for loan in all_loans if str(loan.get('parent_loan_id') or '') == loan_id]
+    parent_loan_id = str(existing_loan.get('parent_loan_id') or '').strip()
+    if linked_payments:
+        sample_payments = ", ".join(str(payment.get('payment_id') or '') for payment in linked_payments[:3] if payment.get('payment_id'))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loan cannot be deleted because {len(linked_payments)} payment record(s) are linked" + (f" ({sample_payments})" if sample_payments else "") + ". Delete those payments first."
+        )
+    if parent_loan_id or child_loans:
+        chain_parts = []
+        if parent_loan_id:
+            chain_parts.append(f"it is linked to old loan {parent_loan_id}")
+        if child_loans:
+            child_ids = ", ".join(str(loan.get('loan_id') or '') for loan in child_loans[:3] if loan.get('loan_id'))
+            chain_parts.append(f"new rollover loan(s) depend on it ({child_ids})" if child_ids else "new rollover loan(s) depend on it")
+        raise HTTPException(
+            status_code=400,
+            detail="Loan cannot be deleted because " + " and ".join(chain_parts) + ". Remove the rollover linkage first."
+        )
+
+    db.delete_row('Loans', 'loan_id', loan_id)
+    db.log_audit('LOAN', loan_id, 'DELETE', existing_loan, None)
+    return {"message": "Loan deleted successfully"}
 
 @app.post("/loans/{loan_id}/waive-interest")
 async def waive_interest(loan_id: str, waiver: InterestWaiver):
@@ -2027,31 +2841,24 @@ async def waive_interest(loan_id: str, waiver: InterestWaiver):
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
-    # Calculate current interest accrued
-    start_date = parse_date_value(loan.get('start_date_iso') or loan.get('start_date'))
-    if not start_date:
-        raise HTTPException(status_code=400, detail="Loan start date is invalid")
-    
-    current_interest = calculate_interest_accrued(
-        float(loan.get('principal_amount', 0) or 0),
-        float(loan.get('interest_rate', 0) or 0),
-        start_date
+    payment_rows = load_normalized_payments(loan_id=loan_id)
+    current_interest = calculate_interest_accrued_for_loan(loan, payment_rows)
+
+    # Track the highest accrued amount we have seen so waiver history stays meaningful.
+    original_interest = max(
+        float(loan.get('original_interest_amount', 0) or 0),
+        current_interest
     )
-    
-    # Store original interest if not already set
-    original_interest = float(loan.get('original_interest_amount', 0))
-    if original_interest == 0:
-        original_interest = current_interest
     
     # Calculate new waived amount (cumulative)
     current_waived = float(loan.get('waived_interest_amount', 0) or 0)
     new_waived_total = current_waived + waiver.waived_amount
     
-    # Validate waiver doesn't exceed accrued interest
-    if new_waived_total > original_interest:
+    # Validate waiver doesn't exceed the currently accrued interest after principal paydowns.
+    if new_waived_total > current_interest:
         raise HTTPException(
             status_code=400, 
-            detail=f"Cannot waive more than accrued interest. Maximum waivable: {original_interest - current_waived}"
+            detail=f"Cannot waive more than accrued interest. Maximum waivable: {max(0, current_interest - current_waived)}"
         )
     
     updates = {
@@ -2116,11 +2923,17 @@ async def create_payment(payment: Payment):
     principal_amount = round(to_float(payment.principal_amount), 2)
     interest_amount = round(to_float(payment.interest_amount), 2)
     total_amount = round(to_float(payment.total_amount if payment.total_amount is not None else payment.amount), 2)
+    requested_type = str(payment.payment_type or '').strip().upper()
+    is_virtual_flag = coerce_bool(payment.is_virtual, default=requested_type == 'BALANCE')
 
     if total_amount <= 0 and (principal_amount > 0 or interest_amount > 0):
         total_amount = round(principal_amount + interest_amount, 2)
 
-    if principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
+    if is_virtual_flag:
+        principal_amount = total_amount or principal_amount
+        interest_amount = 0.0
+        total_amount = round(principal_amount, 2)
+    elif principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
         interest_amount = total_amount
 
     if total_amount <= 0:
@@ -2132,10 +2945,12 @@ async def create_payment(payment: Payment):
     if round(principal_amount + interest_amount, 2) != round(total_amount, 2):
         raise HTTPException(status_code=400, detail="TotalAmount must equal PrincipalAmount + InterestAmount")
 
-    if principal_amount > round(to_float(loan.get('outstanding_balance')), 2):
+    if principal_amount > round(get_outstanding_principal(payment.loan_id), 2):
         raise HTTPException(status_code=400, detail="Principal amount cannot exceed the current outstanding balance")
 
-    if principal_amount > 0 and interest_amount > 0:
+    if is_virtual_flag:
+        payment_type = 'BALANCE'
+    elif principal_amount > 0 and interest_amount > 0:
         payment_type = 'BOTH'
     elif principal_amount > 0:
         payment_type = 'PRINCIPAL'
@@ -2143,6 +2958,8 @@ async def create_payment(payment: Payment):
         payment_type = 'INTEREST'
 
     help_category = str(payment.help_category or 'None').title()
+    if is_virtual_flag:
+        help_category = 'None'
     if help_category != 'None' and help_category not in HELP_CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid help category")
     
@@ -2161,14 +2978,8 @@ async def create_payment(payment: Payment):
         'principal_amount': principal_amount,
         'interest_amount': interest_amount,
         'help_category': help_category,
-        'PaymentID': payment_id,
-        'LoanID': payment.loan_id,
-        'Borrower': payment.customer_id,
-        'PaymentDate': payment.payment_date,
-        'PaymentAmount': total_amount,
-        'PaymentType': payment_type,
-        'Remarks': payment.notes or '',
-        'CreatedOn': datetime.now()
+        'is_virtual': is_virtual_flag,
+        'linked_successor_loan_id': payment.linked_successor_loan_id or ''
     }
     db.add_dict_row('Payments', payload)
     db.log_audit('PAYMENT', payment_id, 'CREATE', None, {
@@ -2177,11 +2988,13 @@ async def create_payment(payment: Payment):
         'principal_amount': principal_amount,
         'interest_amount': interest_amount,
         'type': payment_type,
-        'help_category': help_category
+        'help_category': help_category,
+        'is_virtual': is_virtual_flag,
+        'linked_successor_loan_id': payment.linked_successor_loan_id or ''
     })
 
     help_id = None
-    if help_category != 'None':
+    if help_category != 'None' and not is_virtual_flag:
         customer = next((item for item in load_normalized_customers() if item['customer_id'] == payment.customer_id), None)
         help_id = db.get_next_id('help')
         help_status = title_case_status(payment.help_status, 'Active')
@@ -2198,17 +3011,7 @@ async def create_payment(payment: Payment):
             'help_note': payment.help_note or payment.notes or '',
             'repayment_date': payment.repayment_date or '',
             'repayment_amount': to_optional_money(payment.repayment_amount),
-            'status': help_status,
-            'HelpID': help_id,
-            'CustomerID': payment.customer_id,
-            'CustomerName': customer['name'] if customer else payment.customer_id,
-            'HelpDate': payment.payment_date,
-            'HelpAmount': total_amount,
-            'HelpCategory': help_category,
-            'HelpNote': payment.help_note or payment.notes or '',
-            'RepaymentDate': payment.repayment_date or '',
-            'RepaymentAmount': to_optional_money(payment.repayment_amount),
-            'Status': help_status
+            'status': help_status
         })
         db.log_audit('HELP', help_id, 'CREATE', None, {
             'customer_id': payment.customer_id,
@@ -2218,6 +3021,96 @@ async def create_payment(payment: Payment):
         })
     
     return {"payment_id": payment_id, "help_id": help_id, "message": "Payment recorded successfully"}
+
+@app.put("/payments/{payment_id}")
+async def update_payment(payment_id: str, payment: Payment):
+    """Update an existing payment without altering historical workflow structure."""
+    existing_payment = next((item for item in load_normalized_payments() if item['payment_id'] == payment_id), None)
+    if not existing_payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if str(existing_payment.get('help_category') or 'None').title() != 'None':
+        raise HTTPException(status_code=400, detail="Payments linked to HELP records cannot be edited from this screen")
+    if is_virtual_payment(existing_payment):
+        linked_successor = str(existing_payment.get('linked_successor_loan_id') or '').strip()
+        successor_hint = f" for successor loan {linked_successor}" if linked_successor else ""
+        raise HTTPException(status_code=400, detail=f"Virtual rollover payment {payment_id} cannot be edited from this screen because it keeps the loan chain balanced{successor_hint}.")
+
+    loan = next((item for item in load_normalized_loans() if item['loan_id'] == payment.loan_id), None)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if payment.customer_id != loan.get('customer_id'):
+        raise HTTPException(status_code=400, detail="Payment customer does not match the loan customer")
+
+    principal_amount = round(to_float(payment.principal_amount), 2)
+    interest_amount = round(to_float(payment.interest_amount), 2)
+    total_amount = round(to_float(payment.total_amount if payment.total_amount is not None else payment.amount), 2)
+    requested_type = str(payment.payment_type or '').strip().upper()
+    is_virtual_flag = coerce_bool(payment.is_virtual, default=requested_type == 'BALANCE')
+
+    if total_amount <= 0 and (principal_amount > 0 or interest_amount > 0):
+        total_amount = round(principal_amount + interest_amount, 2)
+    if is_virtual_flag:
+        principal_amount = total_amount or principal_amount
+        interest_amount = 0.0
+        total_amount = round(principal_amount, 2)
+    elif principal_amount <= 0 and interest_amount <= 0 and total_amount > 0:
+        interest_amount = total_amount
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="At least one of principal or interest amount must be greater than 0")
+    if principal_amount < 0 or interest_amount < 0:
+        raise HTTPException(status_code=400, detail="Principal and interest amounts cannot be negative")
+    if round(principal_amount + interest_amount, 2) != round(total_amount, 2):
+        raise HTTPException(status_code=400, detail="TotalAmount must equal PrincipalAmount + InterestAmount")
+
+    outstanding_balance = round(get_outstanding_principal(payment.loan_id), 2)
+    existing_principal = round(to_float(existing_payment.get('principal_amount')), 2)
+    if principal_amount > round(outstanding_balance + existing_principal, 2):
+        raise HTTPException(status_code=400, detail="Principal amount cannot exceed the current editable outstanding balance")
+
+    if is_virtual_flag:
+        payment_type = 'BALANCE'
+    elif principal_amount > 0 and interest_amount > 0:
+        payment_type = 'BOTH'
+    elif principal_amount > 0:
+        payment_type = 'PRINCIPAL'
+    else:
+        payment_type = 'INTEREST'
+
+    updates = {
+        'loan_id': payment.loan_id,
+        'customer_id': payment.customer_id,
+        'payment_date': payment.payment_date,
+        'amount': total_amount,
+        'payment_type': payment_type,
+        'payment_method': payment.payment_method,
+        'reference_number': payment.reference_number or '',
+        'notes': payment.notes or '',
+        'principal_amount': principal_amount,
+        'interest_amount': interest_amount,
+        'help_category': 'None',
+        'is_virtual': is_virtual_flag,
+        'linked_successor_loan_id': payment.linked_successor_loan_id or ''
+    }
+
+    db.update_row('Payments', 'payment_id', payment_id, updates)
+    db.log_audit('PAYMENT', payment_id, 'UPDATE', existing_payment, updates)
+    return {"message": "Payment updated successfully"}
+
+@app.delete("/payments/{payment_id}")
+async def delete_payment(payment_id: str):
+    existing_payment = next((item for item in load_normalized_payments() if item.get('payment_id') == payment_id), None)
+    if not existing_payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if is_virtual_payment(existing_payment):
+        linked_successor = str(existing_payment.get('linked_successor_loan_id') or '').strip()
+        successor_hint = f" for successor loan {linked_successor}" if linked_successor else ""
+        raise HTTPException(status_code=400, detail=f"Virtual rollover payment {payment_id} cannot be deleted from this screen because it keeps the loan chain balanced{successor_hint}.")
+    if str(existing_payment.get('help_category') or 'None').title() != 'None':
+        raise HTTPException(status_code=400, detail="Payments linked to HELP records cannot be deleted from this screen")
+
+    db.delete_row('Payments', 'payment_id', payment_id)
+    db.log_audit('PAYMENT', payment_id, 'DELETE', existing_payment, None)
+    return {"message": "Payment deleted successfully"}
 
 @app.get("/api/help")
 async def get_help_records(customer_id: Optional[str] = None, status: Optional[str] = None):
@@ -2247,17 +3140,7 @@ async def create_help_record(help_record: HelpRecord):
         'help_note': help_record.help_note or '',
         'repayment_date': help_record.repayment_date or '',
         'repayment_amount': to_optional_money(help_record.repayment_amount),
-        'status': status,
-        'HelpID': help_id,
-        'CustomerID': help_record.customer_id,
-        'CustomerName': help_record.customer_name,
-        'HelpDate': help_record.help_date,
-        'HelpAmount': round(to_float(help_record.help_amount), 2),
-        'HelpCategory': help_record.help_category,
-        'HelpNote': help_record.help_note or '',
-        'RepaymentDate': help_record.repayment_date or '',
-        'RepaymentAmount': to_optional_money(help_record.repayment_amount),
-        'Status': status
+        'status': status
     })
     db.log_audit('HELP', help_id, 'CREATE', None, {'customer_id': help_record.customer_id, 'help_amount': help_record.help_amount})
     return {"help_id": help_id, "message": "Help record created successfully"}
@@ -2275,30 +3158,15 @@ async def update_help_record(help_id: str, help_record: HelpRecord):
         'help_note': help_record.help_note or '',
         'repayment_date': help_record.repayment_date or '',
         'repayment_amount': to_optional_money(help_record.repayment_amount),
-        'status': normalized_status,
-        'CustomerID': help_record.customer_id,
-        'CustomerName': help_record.customer_name,
-        'HelpDate': help_record.help_date,
-        'HelpAmount': round(to_float(help_record.help_amount), 2),
-        'HelpCategory': help_record.help_category,
-        'HelpNote': help_record.help_note or '',
-        'RepaymentDate': help_record.repayment_date or '',
-        'RepaymentAmount': to_optional_money(help_record.repayment_amount),
-        'Status': normalized_status
+        'status': normalized_status
     }
-    if isinstance(db, PostgresDB):
-        db.update_row('Help', 'help_id', help_id, {key: value for key, value in updates.items() if key == key.lower()})
-    else:
-        db.update_row('Help', 'HelpID', help_id, updates)
+    db.update_row('Help', 'help_id', help_id, updates)
     db.log_audit('HELP', help_id, 'UPDATE', None, updates)
     return {"message": "Help record updated successfully"}
 
 @app.delete("/api/help/{help_id}")
 async def delete_help_record(help_id: str):
-    if isinstance(db, PostgresDB):
-        db.delete_row('Help', 'help_id', help_id)
-    else:
-        db.delete_row('Help', 'HelpID', help_id)
+    db.delete_row('Help', 'help_id', help_id)
     db.log_audit('HELP', help_id, 'DELETE', None, None)
     return {"message": "Help record deleted successfully"}
 
@@ -2345,8 +3213,8 @@ async def get_capital_summary():
     total_injected = sum(float(inj.get('amount', 0)) for inj in injections)
     
     # BUSINESS RULE: capital reporting excludes add_on_principal from disbursed and collected totals.
-    total_disbursed = sum(float(loan.get('effective_principal_amount', loan.get('principal_amount', 0)) or 0) for loan in loans)
-    principal_collected = sum(float(loan.get('principal_paid', 0) or 0) for loan in loans)
+    total_disbursed = sum(get_reporting_disbursed_amount(loan) for loan in loans)
+    principal_collected = sum(get_reporting_principal_collected_amount(loan) for loan in loans)
     
     # Available = Injected - (Disbursed - Collected)
     capital_in_use = total_disbursed - principal_collected
@@ -2410,8 +3278,8 @@ async def get_dashboard_stats():
     kulu_count = len([l for l in loans if l.get('transaction_type') == 'KULU'])
     debt_count = len([l for l in loans if l.get('transaction_type') == 'DEBT'])
     other_count = len([l for l in loans if l.get('transaction_type') not in {'KULU', 'DEBT'}])
-    total_principal_disbursed = sum(to_float(l.get('effective_principal_amount', l.get('principal_amount'))) for l in loans)
-    principal_collected = sum(to_float(l.get('principal_paid')) for l in loans)
+    total_principal_disbursed = sum(get_reporting_disbursed_amount(l) for l in loans)
+    principal_collected = sum(get_reporting_principal_collected_amount(l) for l in loans)
     interest_collected = sum(to_float(l.get('interest_paid')) for l in loans)
     principal_outstanding = sum(to_float(l.get('outstanding_balance')) for l in loans)
 
@@ -2470,9 +3338,9 @@ async def get_loan_trends():
     for loan in loans:
         month_key = str(loan.get('start_date_iso') or '')[:7]
         if month_key:
-            monthly_data[month_key]['disbursed'] += to_float(loan.get('effective_principal_amount', loan.get('principal_amount')))
+            monthly_data[month_key]['disbursed'] += get_reporting_disbursed_amount(loan)
 
-    remaining_by_loan = {loan['loan_id']: to_float(loan.get('effective_principal_amount', loan.get('principal_amount'))) for loan in loans}
+    remaining_by_loan = {loan['loan_id']: get_reporting_disbursed_amount(loan) for loan in loans}
     for payment in sorted(payments, key=lambda row: ((row.get('payment_date_iso') or ''), row.get('payment_id', ''))):
         month_key = str(payment.get('payment_date_iso') or '')[:7]
         if not month_key:
@@ -2528,16 +3396,28 @@ async def get_financial_metrics(
         return None
     
     def get_principal(loan):
-        for key in ['principal_amount', 'Principal', 'PrincipalAmount', 'Amount', 'LoanAmount']:
-            if key in loan and loan[key] is not None:
+        return get_effective_principal_amount(loan)
+    
+    def get_payment_amount(payment):
+        for key in ['cash_total_amount', 'amount', 'Amount', 'PaymentAmount', 'TransactionAmount']:
+            if key in payment and payment[key] is not None:
                 try:
-                    return float(loan[key])
+                    return float(payment[key])
                 except:
                     continue
         return 0
-    
-    def get_payment_amount(payment):
-        for key in ['amount', 'Amount', 'PaymentAmount', 'TransactionAmount']:
+
+    def get_principal_component(payment):
+        for key in ['cash_principal_amount', 'principal_amount', 'PrincipalAmount']:
+            if key in payment and payment[key] is not None:
+                try:
+                    return float(payment[key])
+                except:
+                    continue
+        return 0
+
+    def get_interest_component(payment):
+        for key in ['cash_interest_amount', 'interest_amount', 'InterestAmount']:
             if key in payment and payment[key] is not None:
                 try:
                     return float(payment[key])
@@ -2633,15 +3513,22 @@ async def get_financial_metrics(
         for p in segment_payments:
             lid = get_loan_id(p)
             if not lid: continue
+            if is_virtual_payment(p):
+                continue
             
             amount = get_payment_amount(p)
             ptype = get_payment_type(p)
+            principal_component = round(max(0, get_principal_component(p)), 2)
+            interest_component = round(max(0, get_interest_component(p)), 2)
             
             p_portion = 0
             i_portion = 0
             
             # Logic: Strictly follow PaymentType
-            if 'PRINCIPAL' in ptype and 'INTEREST' in ptype:
+            if principal_component > 0 or interest_component > 0:
+                 p_portion = principal_component
+                 i_portion = interest_component
+            elif 'PRINCIPAL' in ptype and 'INTEREST' in ptype:
                  # Split logic: Cap at difference
                  remaining = loan_principal_map.get(lid, 0) - loan_principal_collected_tracker[lid]
                  if amount <= remaining:
@@ -2969,7 +3856,13 @@ async def get_trend_data(
 async def get_customers_list():
     """Get list of customers for dropdowns"""
     return [
-        {'id': customer['customer_id'], 'customer_id': customer['customer_id'], 'name': customer['name'], 'status': customer['status']}
+        {
+            'id': customer['customer_id'],
+            'customer_id': customer['customer_id'],
+            'name': customer['name'],
+            'status': customer['status'],
+            'phone': customer.get('phone', '')
+        }
         for customer in load_normalized_customers()
     ]
 

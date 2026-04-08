@@ -37,7 +37,8 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'loan_id',          # Primary Key (e.g., LN001)
         'customer_id',      # Foreign Key to Customers
         'principal_amount', # Original loan amount
-        'add_on_principal', # Principal component excluded from reporting totals
+        'add_on_principal', # Rolled-over balance brought from a closed predecessor loan
+        'fresh_principal',  # Newly disbursed cash excluding rolled-over balance
         'interest_rate',    # Interest rate (monthly, stored as decimal e.g., 0.02 = 2%)
         'loan_type',        # PERSONAL/BUSINESS/MORTGAGE/OTHER
         'start_date',       # Loan disbursement date
@@ -54,7 +55,10 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'original_interest_amount',
         'waived_interest_amount',
         'waiver_reason',
-        'waiver_date'
+        'waiver_date',
+        'parent_loan_id',
+        'loan_chain_id',
+        'chain_start_date'
     ])
     
     # ==================== PAYMENTS TABLE ====================
@@ -65,7 +69,7 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'customer_id',      # Foreign Key to Customers (denormalized for quick lookup)
         'payment_date',     # Date of payment
         'amount',           # TotalAmount
-        'payment_type',     # PRINCIPAL/INTEREST/BOTH
+        'payment_type',     # PRINCIPAL/INTEREST/BOTH/BALANCE
         'payment_method',   # CASH/CHEQUE/BANK_TRANSFER/UPI
         'reference_number', # Cheque/transaction reference
         'created_date',     # Record creation timestamp
@@ -73,7 +77,9 @@ def create_loan_database(filename='LoanManagement_DB.xlsx'):
         'notes',            # Additional notes
         'principal_amount', # Principal component
         'interest_amount',  # Interest component
-        'help_category'     # Optional HELP linkage category
+        'help_category',    # Optional HELP linkage category
+        'is_virtual',       # TRUE when this is an accounting-only rollover entry
+        'linked_successor_loan_id' # Successor loan funded by this virtual balance
     ])
 
     # ==================== HELP TABLE ====================
