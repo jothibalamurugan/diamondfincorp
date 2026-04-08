@@ -928,10 +928,7 @@ def get_runtime_database_url() -> str:
     logger.warning("DATABASE_URL not set. Falling back to local SQLite database at %s", LOCAL_SQLITE_PATH)
     return fallback
 
-def _seed_local_database_from_excel(db: PostgresDB) -> None:
-    if not db.is_sqlite:
-        return
-
+def _bootstrap_database_from_excel_if_empty(db: PostgresDB) -> None:
     db._ensure_schema()
 
     existing_counts = {
@@ -940,17 +937,36 @@ def _seed_local_database_from_excel(db: PostgresDB) -> None:
         'payments': len(db.get_all_rows('Payments'))
     }
     if any(existing_counts.values()):
-        logger.info("Using existing local SQLite data: %s", existing_counts)
+        logger.info(
+            "Using existing runtime data for %s: %s",
+            'local SQLite' if db.is_sqlite else 'configured database',
+            existing_counts
+        )
         return
 
     source_path = Path(LOCAL_SOURCE_WORKBOOK)
     if not source_path.exists():
-        logger.warning("Local seed workbook not found at %s. Starting with an empty SQLite database.", source_path)
+        logger.warning(
+            "Bootstrap workbook not found at %s. Starting with an empty %s database.",
+            source_path,
+            'SQLite' if db.is_sqlite else 'configured'
+        )
         return
 
     from migrate_from_excel import load_source_records, deduplicate_loans, validate_records
+    from loan_chain_migration import (
+        ensure_schema as ensure_rollover_schema,
+        backfill_virtual_flags,
+        backfill_parent_links,
+        backfill_chain_metadata,
+        validate_rollover_totals,
+    )
 
-    logger.info("Seeding local SQLite database from %s", source_path)
+    logger.info(
+        "Bootstrapping empty %s database from %s",
+        'local SQLite' if db.is_sqlite else 'configured',
+        source_path
+    )
     records = load_source_records(source_path)
     deduplicate_loans(records)
 
@@ -1058,19 +1074,33 @@ def _seed_local_database_from_excel(db: PostgresDB) -> None:
                 }
             )
 
+        ensure_rollover_schema(conn, db.is_sqlite)
+        backfill_virtual_flags(conn)
+        parent_matches = backfill_parent_links(conn)
+        chain_updates = backfill_chain_metadata(conn)
+        rollover_validation = validate_rollover_totals(conn)
+
     logger.info(
-        "Seeded local SQLite database from Excel: %s customers, %s loans, %s payments",
+        "Bootstrapped runtime database from Excel: %s customers, %s loans, %s payments, %s parent links, %s chain rows",
         len(records['customers']),
         len(records['loans']),
-        len(records['payments'])
+        len(records['payments']),
+        parent_matches,
+        chain_updates
     )
+    if not rollover_validation.get('matches'):
+        logger.warning(
+            "Rollover validation mismatch after bootstrap: virtual_total=%s add_on_total=%s discrepancies=%s",
+            rollover_validation.get('virtual_payment_total'),
+            rollover_validation.get('add_on_principal_total'),
+            rollover_validation.get('discrepancies')
+        )
 
 DATABASE_URL = get_runtime_database_url()
 logger.info("Initializing runtime database connection...")
 db = PostgresDB(DATABASE_URL)
 db._ensure_schema()
-if db.is_sqlite:
-    _seed_local_database_from_excel(db)
+_bootstrap_database_from_excel_if_empty(db)
 
 # ==================== HELPER FUNCTIONS ====================
 
