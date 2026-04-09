@@ -1909,7 +1909,9 @@ function PaymentsEnhancedV2({toast,customerState,copy,lang}){
         setLoading(true)
         setError('')
         try{
-          const[loanRows,paymentRows]=await Promise.all([api.getLoans(),api.getPayments()])
+          const loanParams={customer_id:filters.customer_id||undefined,loan_type:filters.loan_type==='ALL'?undefined:filters.loan_type}
+          const paymentParams={customer_id:filters.customer_id||undefined}
+          const[loanRows,paymentRows]=await Promise.all([api.getLoans(loanParams),api.getPayments(paymentParams)])
           setLoans(loanRows)
           setPayments(decoratePayments(paymentRows,loanRows))
         }catch(err){
@@ -1920,12 +1922,12 @@ function PaymentsEnhancedV2({toast,customerState,copy,lang}){
         }
       }
 
-      useEffect(()=>{load()},[])
+      useEffect(()=>{load()},[filters.customer_id,filters.loan_type])
       useEffect(()=>{
         const handler=()=>load()
         window.addEventListener(PAYMENT_SAVED_EVENT,handler)
         return()=>window.removeEventListener(PAYMENT_SAVED_EVENT,handler)
-      },[])
+      },[filters.customer_id,filters.loan_type])
 
       const computedRows=useMemo(()=>buildLoanComputedRows(loans,payments),[loans,payments])
       const scopedRows=useMemo(()=>computedRows.filter((row)=>(!filters.customer_id||row.customer_id===filters.customer_id)&&(filters.loan_type==='ALL'||row.transaction_type===filters.loan_type)),[computedRows,filters.customer_id,filters.loan_type])
@@ -2080,8 +2082,9 @@ function PaymentsEnhancedV2({toast,customerState,copy,lang}){
         setLoading(true)
         setError('')
         try{
+          const loanParams={customer_id:appliedFilters.customer_id||undefined,loan_type:appliedFilters.loan_type==='ALL'?undefined:appliedFilters.loan_type}
           const[loanRows,allPaymentRows,paymentRows,customerRows]=await Promise.all([
-            api.getLoans({customer_id:appliedFilters.customer_id||undefined}),
+            api.getLoans(loanParams),
             api.getPayments({customer_id:appliedFilters.customer_id||undefined}),
             api.getPayments({customer_id:appliedFilters.customer_id||undefined,start_date:appliedFilters.start_date||undefined,end_date:appliedFilters.end_date||undefined}),
             api.getCustomers()

@@ -1196,26 +1196,24 @@ def get_loan_type(loan: dict) -> str:
     Checks multiple possible column names for type field.
     Returns 'KULU', 'DEBT', or 'OTHER' (uppercase normalized).
     """
-    # Check various possible column names for loan type
-    # PRIORITIZE 'TYPE' first since that's the user's actual Excel column name
-    type_columns = ['TYPE', 'Type', 'type', 'LoanType', 'Loan_Type', 'loan_type',
-                    'transaction_type', 'TransactionType', 'Transaction_Type',
-                    'Category', 'category', 'Loan Type']
-    
-    loan_type = None
-    
+    # Prefer the actual transaction/type columns first.
+    # `loan_type` in the current app schema is usually a product bucket such as `PERSONAL`,
+    # not the business lending mode (`KULU` / `DEBT`) used by filters.
+    type_columns = [
+        'transaction_type', 'TransactionType', 'Transaction_Type',
+        'TYPE', 'Type', 'type',
+        'Category', 'category', 'Loan Type',
+        'LoanType', 'Loan_Type', 'loan_type',
+    ]
+
     for col in type_columns:
         val = loan.get(col)
-        if val is not None and str(val).strip():
-            loan_type = str(val).strip()
-            break
-    
-    # Normalize and return
-    if loan_type:
-        loan_type_upper = loan_type.upper()
+        if val is None:
+            continue
+        loan_type_upper = str(val).strip().upper()
         if loan_type_upper in ['KULU', 'DEBT']:
             return loan_type_upper
-    
+
     return 'OTHER'
 
 DATE_DISPLAY_FORMAT = '%d-%b-%y'
@@ -3477,10 +3475,12 @@ async def get_financial_metrics(
         return None
 
     def get_loan_type(record):
-        # PRIORITIZE 'TYPE' first since that's the user's actual Excel column name
-        type_columns = ['TYPE', 'Type', 'type', 'LoanType', 'Loan_Type', 'loan_type',
-                        'transaction_type', 'TransactionType', 'Transaction_Type',
-                        'Category', 'category', 'Loan Type']
+        type_columns = [
+            'transaction_type', 'TransactionType', 'Transaction_Type',
+            'TYPE', 'Type', 'type',
+            'Category', 'category', 'Loan Type',
+            'LoanType', 'Loan_Type', 'loan_type',
+        ]
         
         for col in type_columns:
             if col in record and record[col]:
@@ -3731,10 +3731,12 @@ async def get_trend_data(
         return None
     
     def get_loan_type(record):
-        # PRIORITIZE 'TYPE' first since that's the user's actual Excel column name
-        type_columns = ['TYPE', 'Type', 'type', 'LoanType', 'Loan_Type', 'loan_type',
-                        'transaction_type', 'TransactionType', 'Transaction_Type',
-                        'Category', 'category', 'Loan Type']
+        type_columns = [
+            'transaction_type', 'TransactionType', 'Transaction_Type',
+            'TYPE', 'Type', 'type',
+            'Category', 'category', 'Loan Type',
+            'LoanType', 'Loan_Type', 'loan_type',
+        ]
         
         for col in type_columns:
             if col in record and record[col]:
@@ -3912,7 +3914,12 @@ async def get_report_by_transaction_type(
     
     # Helper functions
     def get_loan_type(record):
-        type_columns = ['TYPE', 'Type', 'type', 'LoanType', 'Loan_Type', 'loan_type', 'transaction_type', 'TransactionType', 'Transaction_Type', 'Category', 'category', 'Loan Type']
+        type_columns = [
+            'transaction_type', 'TransactionType', 'Transaction_Type',
+            'TYPE', 'Type', 'type',
+            'Category', 'category', 'Loan Type',
+            'LoanType', 'Loan_Type', 'loan_type',
+        ]
         for col in type_columns:
             if col in record and record[col]:
                 val = str(record[col]).strip().upper()
