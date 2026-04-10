@@ -3,17 +3,19 @@ Diamond Fincorp Loan Management System - Enterprise Backend API
 FastAPI server with Excel backend - Enterprise Grade with Full Feature Set
 """
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Header
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Header, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
+from datetime import timedelta
 from enum import Enum
 import openpyxl
 # openpyxl styles removed — only needed by the deleted ExcelDB class
 import os
 import re
+import secrets
 import threading
 import time
 from io import BytesIO
@@ -22,6 +24,7 @@ import smtplib
 from decimal import Decimal
 import logging
 import json
+import hashlib
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 import shutil
@@ -56,6 +59,54 @@ SMTP_USER = os.environ.get('SMTP_USER', '').strip()
 SMTP_PASS = os.environ.get('SMTP_PASS', '').strip()
 SNAPSHOT_ADMIN_TOKEN = os.environ.get('SNAPSHOT_ADMIN_TOKEN', '').strip()
 SNAPSHOT_SHEETS = ['Customers', 'Loans', 'Payments', 'Help', 'CapitalInjections', 'AuditLog']
+AUTH_HEADER_NAME = 'X-Auth-Token'
+AUTH_QUERY_NAME = 'access_token'
+AUTH_SESSION_DAYS = int(os.environ.get('AUTH_SESSION_DAYS', '7') or '7')
+DEFAULT_STAFF_PASSWORD = os.environ.get('DEFAULT_STAFF_PASSWORD', 'Welcome@123').strip() or 'Welcome@123'
+STAFF_ACCOUNTS = [
+    {
+        'email': 'vairam@vairamfincorp.com',
+        'display_name': 'Vairam',
+        'role': 'ADMIN',
+        'can_delete': True,
+        'dashboard_mode': 'standard',
+    },
+    {
+        'email': 'kannadasan@vairamfincorp.com',
+        'display_name': 'Kannadasan',
+        'role': 'STAFF',
+        'can_delete': False,
+        'dashboard_mode': 'standard',
+    },
+    {
+        'email': 'kalai@vairamfincorp.com',
+        'display_name': 'Kalai',
+        'role': 'ADMIN',
+        'can_delete': True,
+        'dashboard_mode': 'reminders',
+    },
+    {
+        'email': 'abinaya@vairamfincorp.com',
+        'display_name': 'Abinaya',
+        'role': 'STAFF',
+        'can_delete': False,
+        'dashboard_mode': 'standard',
+    },
+    {
+        'email': 'nishanthini@vairamfincorp.com',
+        'display_name': 'Nishanthini',
+        'role': 'STAFF',
+        'can_delete': False,
+        'dashboard_mode': 'standard',
+    },
+    {
+        'email': 'developer@vairamfincorp.com',
+        'display_name': 'Developer',
+        'role': 'STAFF',
+        'can_delete': False,
+        'dashboard_mode': 'standard',
+    },
+]
 
 def using_sqlite_database(database_url: str) -> bool:
     return str(database_url or '').strip().lower().startswith('sqlite:')
@@ -119,6 +170,49 @@ def build_customer_asset_response(customer_id: str, asset: Optional[Dict[str, An
     response = dict(asset)
     response['download_url'] = f"/customers/{customer_id}/assets/{asset['asset_id']}"
     return response
+
+def normalize_auth_email(value: str) -> str:
+    return str(value or '').strip().lower()
+
+def hash_password(password: str, salt_hex: Optional[str] = None) -> str:
+    password_text = str(password or '')
+    if not password_text:
+        raise ValueError("Password cannot be empty")
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password_text.encode('utf-8'), salt, 260000)
+    return f"{salt.hex()}${digest.hex()}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt_hex, expected_hash = str(stored_hash or '').split('$', 1)
+    except ValueError:
+        return False
+    calculated = hash_password(password, salt_hex=salt_hex)
+    return secrets.compare_digest(calculated, f"{salt_hex}${expected_hash}")
+
+def build_auth_user_payload(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    stored_hash = str(row.get('password_hash') or '').strip()
+    return {
+        'user_id': str(row.get('user_id') or '').strip(),
+        'email': normalize_auth_email(row.get('email') or ''),
+        'display_name': str(row.get('display_name') or row.get('email') or '').strip(),
+        'role': str(row.get('role') or 'STAFF').strip().upper() or 'STAFF',
+        'can_delete': bool(row.get('can_delete')),
+        'dashboard_mode': str(row.get('dashboard_mode') or 'standard').strip().lower() or 'standard',
+        'is_active': bool(row.get('is_active', True)),
+        'temporary_password': bool(stored_hash and verify_password(DEFAULT_STAFF_PASSWORD, stored_hash)),
+    }
+
+def get_auth_token_from_request(request: Request) -> str:
+    header_token = str(request.headers.get(AUTH_HEADER_NAME) or '').strip()
+    if header_token:
+        return header_token
+    query_token = str(request.query_params.get(AUTH_QUERY_NAME) or '').strip()
+    if query_token:
+        return query_token
+    return ''
 
 def attach_customer_assets(customer: Dict[str, Any]) -> Dict[str, Any]:
     customer_id = str(customer.get('customer_id') or customer.get('id') or '')
@@ -274,6 +368,30 @@ async def start_snapshot_scheduler():
     thread.start()
     logger.info("Snapshot scheduler started for 11:00 PM daily in %s", SNAPSHOT_TIMEZONE)
 
+AUTH_EXEMPT_PATHS = {
+    '/',
+    '/brand-logo',
+    '/auth/login',
+    '/favicon.ico',
+    '/docs',
+    '/openapi.json',
+    '/redoc',
+}
+
+@app.middleware("http")
+async def auth_session_middleware(request: Request, call_next):
+    path = request.url.path or '/'
+    if request.method == 'OPTIONS' or path in AUTH_EXEMPT_PATHS or path.startswith('/docs/'):
+        return await call_next(request)
+
+    token = get_auth_token_from_request(request)
+    user = get_session_user(token)
+    if not user:
+        return JSONResponse(status_code=401, content={'detail': "Please log in to continue."})
+    request.state.user = user
+    request.state.auth_token = token
+    return await call_next(request)
+
 @app.get("/")
 async def serve_frontend():
     frontend_path = os.path.join(BASE_DIR, '..', 'frontend', 'index.html')
@@ -291,6 +409,122 @@ async def serve_brand_logo():
     if os.path.exists(logo_path):
         return FileResponse(logo_path, media_type='image/png')
     raise HTTPException(status_code=404, detail="Brand logo not found")
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class StaffPasswordResetRequest(BaseModel):
+    new_password: Optional[str] = None
+
+@app.post("/auth/login")
+async def login(payload: LoginRequest):
+    email = normalize_auth_email(payload.email)
+    account = get_user_account_by_email(email)
+    if not account or not bool(account.get('is_active', True)):
+        raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+    if not verify_password(payload.password, account.get('password_hash') or ''):
+        raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+
+    token = create_user_session(account['user_id'])
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE user_accounts SET last_login = :last_login WHERE user_id = :user_id"),
+            {'last_login': datetime.now(), 'user_id': account['user_id']}
+        )
+    user = build_auth_user_payload(account)
+    db.log_audit('AUTH', account['user_id'], 'LOGIN', None, {'email': email}, user=email)
+    return {
+        'token': token,
+        'user': user,
+        'temporary_password': bool(user.get('temporary_password'))
+    }
+
+@app.get("/auth/me")
+async def get_current_user(request: Request):
+    user = get_request_user(request)
+    return {'user': user}
+
+@app.post("/auth/logout")
+async def logout(request: Request):
+    user = get_request_user(request)
+    revoke_user_session(getattr(request.state, 'auth_token', '') or get_auth_token_from_request(request))
+    db.log_audit('AUTH', user.get('user_id') or user.get('email') or '', 'LOGOUT', None, None, user=user.get('email') or 'USER')
+    return {'message': 'Logged out successfully'}
+
+@app.post("/auth/change-password")
+async def change_password(payload: PasswordChangeRequest, request: Request):
+    user = get_request_user(request)
+    account = get_user_account_by_email(user.get('email') or '')
+    if not account:
+        raise HTTPException(status_code=404, detail="User account not found")
+    if not verify_password(payload.current_password, account.get('password_hash') or ''):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    if len(str(payload.new_password or '')) < 8:
+        raise HTTPException(status_code=400, detail="New password must have at least 8 characters.")
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE user_accounts SET password_hash = :password_hash WHERE user_id = :user_id"),
+            {'password_hash': hash_password(payload.new_password), 'user_id': account['user_id']}
+        )
+    db.log_audit('AUTH', account['user_id'], 'CHANGE_PASSWORD', None, None, user=user.get('email') or 'USER')
+    return {'message': 'Password updated successfully'}
+
+@app.get("/auth/staff")
+async def list_staff_accounts(request: Request):
+    admin_user = require_admin_user(request)
+    with db.engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT user_id, email, display_name, role, can_delete, dashboard_mode, is_active, created_date, last_login, password_hash
+                FROM user_accounts
+                ORDER BY lower(display_name), lower(email)
+            """)
+        ).mappings().all()
+    accounts = []
+    for row in rows:
+        item = dict(row)
+        payload = build_auth_user_payload(item) or {}
+        accounts.append({
+            **payload,
+            'created_date': item.get('created_date'),
+            'last_login': item.get('last_login')
+        })
+    db.log_audit('AUTH', admin_user.get('user_id') or admin_user.get('email') or '', 'LIST_STAFF', None, None, user=admin_user.get('email') or 'ADMIN')
+    return {'accounts': accounts}
+
+@app.post("/auth/staff/{user_id}/reset-password")
+async def reset_staff_password(user_id: str, request: Request, payload: Optional[StaffPasswordResetRequest] = None):
+    admin_user = require_admin_user(request)
+    target = get_user_account_by_user_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Staff account not found")
+    next_password = str((payload.new_password if payload else '') or DEFAULT_STAFF_PASSWORD).strip()
+    if len(next_password) < 8:
+        raise HTTPException(status_code=400, detail="Temporary password must have at least 8 characters.")
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE user_accounts SET password_hash = :password_hash WHERE user_id = :user_id"),
+            {'password_hash': hash_password(next_password), 'user_id': target['user_id']}
+        )
+    db.log_audit(
+        'AUTH',
+        target['user_id'],
+        'RESET_PASSWORD',
+        None,
+        json.dumps({'reset_by': admin_user.get('email'), 'temporary_password': next_password == DEFAULT_STAFF_PASSWORD}),
+        user=admin_user.get('email') or 'ADMIN'
+    )
+    return {
+        'message': f"Password reset for {target.get('display_name') or target.get('email') or target['user_id']}",
+        'temporary_password': next_password,
+        'email': normalize_auth_email(target.get('email') or ''),
+        'display_name': str(target.get('display_name') or target.get('email') or '').strip()
+    }
 
 # ==================== ENUMS ====================
 
@@ -493,7 +727,9 @@ class PostgresDB:
         'Help': 'help_records',
         'CapitalInjections': 'capital_injections',
         'AuditLog': 'audit_log',
-        'SystemConfig': 'system_config'
+        'SystemConfig': 'system_config',
+        'UserAccounts': 'user_accounts',
+        'UserSessions': 'user_sessions'
     }
     TABLE_COLUMNS = {
         'Customers': {'customer_id', 'name', 'phone', 'email', 'address', 'id_proof_type', 'id_proof_number', 'status', 'created_date', 'notes'},
@@ -502,7 +738,9 @@ class PostgresDB:
         'Help': {'help_id', 'customer_id', 'customer_name', 'help_date', 'help_amount', 'help_category', 'help_note', 'repayment_date', 'repayment_amount', 'status'},
         'CapitalInjections': {'injection_id', 'source_type', 'amount', 'injection_date', 'description', 'created_by', 'created_date'},
         'AuditLog': {'log_id', 'entity_type', 'entity_id', 'action', 'old_value', 'new_value', 'user', 'timestamp'},
-        'SystemConfig': {'config_key', 'config_value', 'description', 'last_updated'}
+        'SystemConfig': {'config_key', 'config_value', 'description', 'last_updated'},
+        'UserAccounts': {'user_id', 'email', 'display_name', 'password_hash', 'role', 'can_delete', 'dashboard_mode', 'is_active', 'created_date', 'last_login'},
+        'UserSessions': {'session_id', 'user_id', 'token', 'created_at', 'expires_at', 'last_seen'}
     }
     COLUMN_ALIASES = {
         'Customers': {'BorrowerID': 'customer_id', 'BorrowerName': 'name', 'Phone': 'phone', 'Address': 'address', 'IsActive': 'status', 'CreatedOn': 'created_date'},
@@ -511,7 +749,9 @@ class PostgresDB:
         'Help': {'HelpID': 'help_id', 'CustomerID': 'customer_id', 'CustomerName': 'customer_name', 'HelpDate': 'help_date', 'HelpAmount': 'help_amount', 'HelpCategory': 'help_category', 'HelpNote': 'help_note', 'RepaymentDate': 'repayment_date', 'RepaymentAmount': 'repayment_amount', 'Status': 'status'},
         'CapitalInjections': {},
         'AuditLog': {'user': 'user'},
-        'SystemConfig': {}
+        'SystemConfig': {},
+        'UserAccounts': {},
+        'UserSessions': {}
     }
     
     def __init__(self, database_url: str):
@@ -688,6 +928,32 @@ class PostgresDB:
                     config_value VARCHAR(255),
                     description TEXT,
                     last_updated TIMESTAMP
+                )
+            '''))
+
+            conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS user_accounts (
+                    user_id VARCHAR(64) PRIMARY KEY,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    display_name VARCHAR(255),
+                    password_hash TEXT NOT NULL,
+                    role VARCHAR(50),
+                    can_delete BOOLEAN DEFAULT FALSE,
+                    dashboard_mode VARCHAR(50) DEFAULT 'standard',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_date TIMESTAMP,
+                    last_login TIMESTAMP
+                )
+            '''))
+
+            conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    session_id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(64) NOT NULL,
+                    token VARCHAR(128) UNIQUE NOT NULL,
+                    created_at TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    last_seen TIMESTAMP
                 )
             '''))
 
@@ -920,6 +1186,154 @@ class PostgresDB:
         self.add_row('AuditLog', data)
         return audit_id
 
+def seed_staff_accounts(db: PostgresDB) -> None:
+    db._ensure_schema()
+    with db.engine.begin() as conn:
+        for account in STAFF_ACCOUNTS:
+            email = normalize_auth_email(account['email'])
+            existing = conn.execute(
+                text("SELECT user_id FROM user_accounts WHERE lower(email) = :email LIMIT 1"),
+                {'email': email}
+            ).mappings().first()
+            if existing:
+                conn.execute(
+                    text("""
+                        UPDATE user_accounts
+                        SET display_name = :display_name,
+                            role = :role,
+                            can_delete = :can_delete,
+                            dashboard_mode = :dashboard_mode,
+                            is_active = TRUE
+                        WHERE user_id = :user_id
+                    """),
+                    {
+                        'display_name': account['display_name'],
+                        'role': account['role'],
+                        'can_delete': bool(account['can_delete']),
+                        'dashboard_mode': account['dashboard_mode'],
+                        'user_id': existing['user_id']
+                    }
+                )
+                continue
+            conn.execute(
+                text("""
+                    INSERT INTO user_accounts (
+                        user_id, email, display_name, password_hash, role, can_delete,
+                        dashboard_mode, is_active, created_date, last_login
+                    ) VALUES (
+                        :user_id, :email, :display_name, :password_hash, :role, :can_delete,
+                        :dashboard_mode, :is_active, :created_date, :last_login
+                    )
+                """),
+                {
+                    'user_id': uuid4().hex,
+                    'email': email,
+                    'display_name': account['display_name'],
+                    'password_hash': hash_password(DEFAULT_STAFF_PASSWORD),
+                    'role': account['role'],
+                    'can_delete': bool(account['can_delete']),
+                    'dashboard_mode': account['dashboard_mode'],
+                    'is_active': True,
+                    'created_date': datetime.now(),
+                    'last_login': None
+                }
+            )
+
+def get_user_account_by_email(email: str) -> Optional[Dict[str, Any]]:
+    normalized_email = normalize_auth_email(email)
+    if not normalized_email:
+        return None
+    with db.engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT * FROM user_accounts WHERE lower(email) = :email LIMIT 1"),
+            {'email': normalized_email}
+        ).mappings().first()
+        return dict(row) if row else None
+
+def get_user_account_by_user_id(user_id: str) -> Optional[Dict[str, Any]]:
+    normalized_user_id = str(user_id or '').strip()
+    if not normalized_user_id:
+        return None
+    with db.engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT * FROM user_accounts WHERE user_id = :user_id LIMIT 1"),
+            {'user_id': normalized_user_id}
+        ).mappings().first()
+        return dict(row) if row else None
+
+def create_user_session(user_id: str) -> str:
+    now = datetime.now()
+    expires_at = now + timedelta(days=max(1, AUTH_SESSION_DAYS))
+    token = secrets.token_urlsafe(32)
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM user_sessions WHERE user_id = :user_id"),
+            {'user_id': user_id}
+        )
+        conn.execute(
+            text("""
+                INSERT INTO user_sessions (session_id, user_id, token, created_at, expires_at, last_seen)
+                VALUES (:session_id, :user_id, :token, :created_at, :expires_at, :last_seen)
+            """),
+            {
+                'session_id': uuid4().hex,
+                'user_id': user_id,
+                'token': token,
+                'created_at': now,
+                'expires_at': expires_at,
+                'last_seen': now
+            }
+        )
+    return token
+
+def get_session_user(token: str) -> Optional[Dict[str, Any]]:
+    normalized_token = str(token or '').strip()
+    if not normalized_token:
+        return None
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM user_sessions WHERE expires_at IS NOT NULL AND expires_at < :now"),
+            {'now': datetime.now()}
+        )
+        row = conn.execute(
+            text("""
+                SELECT ua.*
+                FROM user_sessions us
+                JOIN user_accounts ua ON ua.user_id = us.user_id
+                WHERE us.token = :token
+                  AND (us.expires_at IS NULL OR us.expires_at >= :now)
+                  AND coalesce(ua.is_active, TRUE) = TRUE
+                LIMIT 1
+            """),
+            {'token': normalized_token, 'now': datetime.now()}
+        ).mappings().first()
+        if not row:
+            return None
+        conn.execute(
+            text("UPDATE user_sessions SET last_seen = :last_seen WHERE token = :token"),
+            {'last_seen': datetime.now(), 'token': normalized_token}
+        )
+        return build_auth_user_payload(dict(row))
+
+def revoke_user_session(token: str) -> None:
+    normalized_token = str(token or '').strip()
+    if not normalized_token:
+        return
+    with db.engine.begin() as conn:
+        conn.execute(text("DELETE FROM user_sessions WHERE token = :token"), {'token': normalized_token})
+
+def get_request_user(request: Request) -> Dict[str, Any]:
+    user = getattr(request.state, 'user', None)
+    if user:
+        return user
+    raise HTTPException(status_code=401, detail="Please log in to continue.")
+
+def require_admin_user(request: Request) -> Dict[str, Any]:
+    user = get_request_user(request)
+    if not user.get('can_delete'):
+        raise HTTPException(status_code=403, detail="Only admin accounts can delete records.")
+    return user
+
 def get_runtime_database_url() -> str:
     configured = str(os.environ.get('DATABASE_URL', '') or '').strip()
     if configured:
@@ -1101,6 +1515,7 @@ logger.info("Initializing runtime database connection...")
 db = PostgresDB(DATABASE_URL)
 db._ensure_schema()
 _bootstrap_database_from_excel_if_empty(db)
+seed_staff_accounts(db)
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -2409,7 +2824,8 @@ async def update_customer(customer_id: str, customer: Customer):
     return {"message": "Customer updated successfully"}
 
 @app.delete("/customers/{customer_id}")
-async def delete_customer(customer_id: str):
+async def delete_customer(customer_id: str, request: Request):
+    admin_user = require_admin_user(request)
     customer = await get_customer(customer_id)
     linked_loans = [loan for loan in load_normalized_loans() if loan.get('customer_id') == customer_id]
     linked_payments = [payment for payment in load_normalized_payments() if payment.get('customer_id') == customer_id]
@@ -2437,7 +2853,7 @@ async def delete_customer(customer_id: str):
     if os.path.exists(asset_dir):
         shutil.rmtree(asset_dir, ignore_errors=True)
 
-    db.log_audit('CUSTOMER', customer_id, 'DELETE', customer, None)
+    db.log_audit('CUSTOMER', customer_id, 'DELETE', customer, None, user=admin_user.get('email') or 'USER')
     return {"message": "Customer deleted successfully"}
 
 @app.get("/customers/{customer_id}/assets")
@@ -2528,7 +2944,8 @@ async def download_customer_asset(customer_id: str, asset_id: str):
     return FileResponse(asset_path, media_type=asset.get('content_type') or 'application/octet-stream', filename=asset.get('filename') or asset.get('stored_name'))
 
 @app.delete("/customers/{customer_id}/assets/{asset_id}")
-async def delete_customer_asset(customer_id: str, asset_id: str):
+async def delete_customer_asset(customer_id: str, asset_id: str, request: Request):
+    admin_user = require_admin_user(request)
     await get_customer(customer_id)
     metadata = load_customer_asset_metadata(customer_id)
     photo = metadata.get('photo')
@@ -2551,7 +2968,7 @@ async def delete_customer_asset(customer_id: str, asset_id: str):
     if os.path.exists(asset_path):
         os.remove(asset_path)
     save_customer_asset_metadata(customer_id, metadata)
-    db.log_audit('CUSTOMER', customer_id, 'DELETE_ASSET', None, {'asset_id': asset_id, 'filename': removed.get('filename', '')})
+    db.log_audit('CUSTOMER', customer_id, 'DELETE_ASSET', None, {'asset_id': asset_id, 'filename': removed.get('filename', '')}, user=admin_user.get('email') or 'USER')
     return {"message": "Asset deleted successfully"}
 
 @app.get("/api/admin/trigger-snapshot")
@@ -2829,7 +3246,8 @@ async def update_loan(loan_id: str, loan: Loan):
     return {"message": "Loan updated successfully"}
 
 @app.delete("/loans/{loan_id}")
-async def delete_loan(loan_id: str):
+async def delete_loan(loan_id: str, request: Request):
+    admin_user = require_admin_user(request)
     all_loans = load_normalized_loans()
     existing_loan = next((item for item in all_loans if item.get('loan_id') == loan_id), None)
     if not existing_loan:
@@ -2857,7 +3275,7 @@ async def delete_loan(loan_id: str):
         )
 
     db.delete_row('Loans', 'loan_id', loan_id)
-    db.log_audit('LOAN', loan_id, 'DELETE', existing_loan, None)
+    db.log_audit('LOAN', loan_id, 'DELETE', existing_loan, None, user=admin_user.get('email') or 'USER')
     return {"message": "Loan deleted successfully"}
 
 @app.post("/loans/{loan_id}/waive-interest")
@@ -3125,7 +3543,8 @@ async def update_payment(payment_id: str, payment: Payment):
     return {"message": "Payment updated successfully"}
 
 @app.delete("/payments/{payment_id}")
-async def delete_payment(payment_id: str):
+async def delete_payment(payment_id: str, request: Request):
+    admin_user = require_admin_user(request)
     existing_payment = next((item for item in load_normalized_payments() if item.get('payment_id') == payment_id), None)
     if not existing_payment:
         raise HTTPException(status_code=404, detail="Payment not found")
@@ -3137,7 +3556,7 @@ async def delete_payment(payment_id: str):
         raise HTTPException(status_code=400, detail="Payments linked to HELP records cannot be deleted from this screen")
 
     db.delete_row('Payments', 'payment_id', payment_id)
-    db.log_audit('PAYMENT', payment_id, 'DELETE', existing_payment, None)
+    db.log_audit('PAYMENT', payment_id, 'DELETE', existing_payment, None, user=admin_user.get('email') or 'USER')
     return {"message": "Payment deleted successfully"}
 
 @app.get("/api/help")
@@ -3193,9 +3612,10 @@ async def update_help_record(help_id: str, help_record: HelpRecord):
     return {"message": "Help record updated successfully"}
 
 @app.delete("/api/help/{help_id}")
-async def delete_help_record(help_id: str):
+async def delete_help_record(help_id: str, request: Request):
+    admin_user = require_admin_user(request)
     db.delete_row('Help', 'help_id', help_id)
-    db.log_audit('HELP', help_id, 'DELETE', None, None)
+    db.log_audit('HELP', help_id, 'DELETE', None, None, user=admin_user.get('email') or 'USER')
     return {"message": "Help record deleted successfully"}
 
 # ========== CAPITAL INJECTION ENDPOINTS ==========
